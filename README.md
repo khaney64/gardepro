@@ -27,3 +27,27 @@ in `gardepro-e6p-investigation.md` for platform-specific setup and usage.
 
 For implementation details, endpoint findings, and current open questions, start
 with `gardepro-e6p-investigation.md`.
+
+## Web Interface
+
+A self-hosted web app (`web/`) runs on the Raspberry Pi and replaces the vendor
+mobile app for browsing media, deleting files, live streaming, and reading camera
+settings.
+
+**Run:**
+```bash
+cd web
+GARDEPRO_WIFI_PASSWORD=<password> python3 -m uvicorn server:app --host 0.0.0.0 --port 8080
+```
+Then open `http://<pi-ip>:8080` from any device on the home network.
+
+**Files:**
+- `web/server.py` — FastAPI backend: BLE wake, WiFi connect, media proxy, HLS streaming
+- `web/static/` — Vanilla HTML/JS/CSS frontend (no build step)
+- `web/PLAN.md` — Full architecture, phase status, and open questions
+
+**Dependencies:** `sudo apt-get install -y python3-fastapi python3-uvicorn ffmpeg`
+
+Phase 1 (core gallery, live view, settings read) is complete. Phase 2 (settings
+write, time sync) is blocked pending BLE Level 1–3 auth implementation. See
+`web/PLAN.md` for details.
