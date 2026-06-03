@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#1a1a2e">
+  <title>GardePro</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+  <!-- ── App header (visible when connected or connecting) ── -->
+  <header id="app-header" class="hidden">
+    <div class="header-left">
+      <span class="app-title">GardePro</span>
+      <span id="status-dot" class="status-dot"></span>
+      <span id="status-label" class="status-label"></span>
+      <span id="signal-badge" class="signal-badge hidden"></span>
+    </div>
+    <nav id="tab-nav" class="tab-nav desktop-only">
+      <button class="tab-btn active" data-tab="gallery" onclick="showTab('gallery')">Gallery</button>
+      <button class="tab-btn" data-tab="live" onclick="showTab('live')">Live</button>
+      <button class="tab-btn" data-tab="settings" onclick="showTab('settings')">Settings</button>
+    </nav>
+    <button id="disconnect-btn" class="btn btn-danger btn-sm" onclick="disconnectCamera()">Disconnect</button>
+  </header>
+
+  <!-- ── Connect panel (shown when disconnected) ── -->
+  <div id="connect-panel">
+    <div class="connect-card">
+      <div class="camera-icon">📷</div>
+      <h1>GardePro</h1>
+      <p class="connect-subtitle">Trail Camera Manager</p>
+      <div id="connect-error" class="error-banner hidden"></div>
+      <button id="connect-btn" class="btn btn-primary btn-lg" onclick="connectCamera()">
+        Connect Camera
+      </button>
+      <div id="connect-log" class="connect-log hidden"></div>
+    </div>
+  </div>
+
+  <!-- ── Main content (visible when connected) ── -->
+  <main id="main-content" class="hidden">
+
+    <!-- Gallery tab -->
+    <div id="tab-gallery" class="tab-panel">
+      <div class="gallery-toolbar">
+        <div class="toolbar-left">
+          <span id="media-count" class="media-count"></span>
+          <select id="page-size" class="page-size-select" onchange="onPageSizeChange()">
+            <option value="12">12</option>
+            <option value="24" selected>24</option>
+            <option value="48">48</option>
+          </select>
+        </div>
+        <div class="toolbar-center">
+          <button class="btn btn-icon" onclick="prevPage()" title="Previous page">‹</button>
+          <span id="page-info" class="page-info">0 / 0</span>
+          <button class="btn btn-icon" onclick="nextPage()" title="Next page">›</button>
+        </div>
+        <div class="toolbar-right">
+          <button id="select-all-btn" class="btn btn-sm hidden" onclick="selectAll()">All</button>
+          <button id="delete-sel-btn" class="btn btn-sm btn-danger hidden" onclick="deleteSelected()">Delete (<span id="sel-count">0</span>)</button>
+          <button id="multiselect-cancel-btn" class="btn btn-sm hidden" onclick="exitMultiSelect()">Cancel</button>
+        </div>
+      </div>
+
+      <div id="gallery-progress" class="gallery-progress hidden">
+        <span id="gallery-progress-text">Scanning media…</span>
+      </div>
+
+      <div id="gallery-grid" class="gallery-grid"></div>
+      <div id="gallery-empty" class="gallery-empty hidden">No media found on camera.</div>
+    </div>
+
+    <!-- Live tab -->
+    <div id="tab-live" class="tab-panel hidden">
+      <div class="live-panel">
+        <div class="live-info" id="live-info">
+          <h3>Live Stream</h3>
+          <div id="rtsp-info" class="rtsp-info hidden">
+            <p class="label">VLC / any RTSP player:</p>
+            <div class="rtsp-url-row">
+              <code id="rtsp-url-text"></code>
+              <button class="btn btn-sm" onclick="copyRtspUrl()">Copy</button>
+            </div>
+          </div>
+          <div id="hls-section">
+            <button id="watch-btn" class="btn btn-primary" onclick="toggleHls()">
+              ▶ Watch in Browser
+            </button>
+            <p class="hint" id="hls-hint"></p>
+          </div>
+        </div>
+        <div id="hls-player-wrap" class="hls-player-wrap hidden">
+          <video id="hls-video" controls autoplay playsinline muted></video>
+          <button class="btn btn-sm btn-danger live-stop-btn" onclick="stopHls()">Stop</button>
+        </div>
+        <div id="live-disconnected" class="live-disconnected hidden">
+          <p>Connect to the camera to enable live streaming.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Settings tab -->
+    <div id="tab-settings" class="tab-panel hidden">
+      <div class="settings-panel">
+        <div class="settings-section">
+          <h3>Camera Settings</h3>
+          <div id="settings-loading" class="settings-loading">
+            <button class="btn btn-primary" onclick="loadSettings()">Load Settings</button>
+          </div>
+          <div id="settings-table-wrap" class="hidden"></div>
+        </div>
+        <div class="settings-section">
+          <h3>Actions</h3>
+          <div class="action-row">
+            <div>
+              <strong>Format SD Card</strong>
+              <p class="hint">Permanently deletes all media on the card.</p>
+            </div>
+            <button class="btn btn-danger" onclick="formatSD()">Format…</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- ── Bottom nav (mobile) ── -->
+  <nav id="bottom-nav" class="bottom-nav mobile-only hidden">
+    <button class="nav-item active" data-tab="gallery" onclick="showTab('gallery')">
+      <span class="nav-icon">🖼</span>
+      <span>Gallery</span>
+    </button>
+    <button class="nav-item" data-tab="live" onclick="showTab('live')">
+      <span class="nav-icon">📡</span>
+      <span>Live</span>
+    </button>
+    <button class="nav-item" data-tab="settings" onclick="showTab('settings')">
+      <span class="nav-icon">⚙️</span>
+      <span>Settings</span>
+    </button>
+  </nav>
+
+  <!-- ── Lightbox ── -->
+  <div id="lightbox" class="lightbox" onclick="lightboxBgClick(event)">
+    <div class="lb-header">
+      <button class="lb-btn" onclick="closeLightbox()">✕</button>
+      <span id="lb-counter" class="lb-counter"></span>
+      <button id="lb-delete-btn" class="lb-btn lb-delete" onclick="lightboxDelete()">🗑</button>
+    </div>
+    <div id="lightbox-content" class="lb-content"></div>
+    <button class="lb-arrow lb-prev" onclick="lightboxPrev()">‹</button>
+    <button class="lb-arrow lb-next" onclick="lightboxNext()">›</button>
+  </div>
+
+  <!-- HLS.js from CDN (loaded only when needed) -->
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest/dist/hls.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
