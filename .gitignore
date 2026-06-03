@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local tool and agent settings
+.claude/
+.agents/
+.codex/
+private-notes.md
+
+
+# Raw captures, logs, dumps, and generated analysis outputs
+*.log
+*.txt
+*.jsonl
+*.dump
+captures/
+
+# Android and reverse-engineering artifacts
+*.apk
+*.dex
+*.zip
+
+# Temporary and OS-generated files
+*.tmp
+*.bak
+*.swp
+.DS_Store
+Thumbs.db
