@@ -15,6 +15,10 @@ Usage:
     python ble_wake.py -p <pw> --no-reconnect   # stay on camera WiFi when done
     python ble_wake.py -p <pw> -r <home-ssid>   # explicit home network to return to
     python ble_wake.py --probe                  # also run AT WiFi config queries
+
+Linux-specific options:
+    python ble_wake.py --wifi-interface wlx74da388d4fd6 -p <pw>   # use Edimax for camera
+    python ble_wake.py --ble-adapter hci0 --wifi-interface wlx74da388d4fd6 -p <pw>
 """
 import argparse
 import asyncio
@@ -170,147 +174,14 @@ WIFI_PROFILE_OPEN = """\
 </WLANProfile>
 """
 
-# ── netsh helpers ─────────────────────────────────────────────────────────────
+# ── platform helpers ──────────────────────────────────────────────────────────
 
-def netsh(*args, timeout=10):
-    try:
-        return subprocess.check_output(
-            ["netsh"] + list(args),
-            text=True, encoding="utf-8", errors="replace", timeout=timeout
-        )
-    except Exception:
-        return ""
+def is_linux():
+    return platform.system().lower() == "linux"
 
 
-def get_wifi_interface():
-    """Return the name of the first active WLAN interface (e.g. 'Wi-Fi')."""
-    out = netsh("wlan", "show", "interfaces")
-    for line in out.splitlines():
-        m = re.match(r"^\s+Name\s*:\s*(.+)$", line)
-        if m:
-            return m.group(1).strip()
-    return "Wi-Fi"
-
-
-def get_active_ssid():
-    """Return the SSID the adapter is currently connected to, or None."""
-    out = netsh("wlan", "show", "interfaces")
-    for line in out.splitlines():
-        m = re.match(r"^\s+(?:Profile|SSID)\s*:\s*(.+)$", line)
-        if m:
-            val = m.group(1).strip()
-            if val and val != "Profile":
-                return val
-    return None
-
-
-def scan_wifi():
-    out = netsh("wlan", "show", "networks", "mode=bssid")
-    networks = {}
-    current_ssid = None
-    for line in out.splitlines():
-        line = line.strip()
-        m = re.match(r"^SSID\s+\d+\s*:\s*(.+)$", line)
-        if m:
-            current_ssid = m.group(1).strip()
-        m2 = re.match(r"^BSSID\s+\d+\s*:\s*([\da-fA-F:]{17})$", line)
-        if m2 and current_ssid:
-            networks[current_ssid] = m2.group(1)
-    return networks
-
-
-def wait_for_ip(interface, timeout=20):
-    """Wait until the interface has a non-APIPA IP. Returns (my_ip, gateway) or (None, None)."""
-    print(f"  Waiting for DHCP on {interface} ...")
-    for i in range(timeout):
-        time.sleep(1)
-        out = netsh("interface", "ip", "show", "config", f"name={interface}")
-        my_ip = gateway = None
-        for line in out.splitlines():
-            m = re.search(r"IP Address:\s+([\d.]+)", line)
-            if m and not m.group(1).startswith("169.254"):
-                my_ip = m.group(1)
-            m2 = re.search(r"Default Gateway:\s+([\d.]+)", line)
-            if m2 and not m2.group(1).startswith("0.0.0.0"):
-                gateway = m2.group(1)
-        if my_ip:
-            print(f"  My IP  : {my_ip} (after {i+1}s)")
-            print(f"  Gateway: {gateway or '(none yet)'}")
-            return my_ip, gateway
-    return None, None
-
-
-def arp_scan_subnet(my_ip):
-    """Ping-sweep the /24 subnet and return IPs that reply (from ARP table)."""
-    prefix = ".".join(my_ip.split(".")[:3])
-    prefix_dot = prefix + "."
-    print(f"  ARP scan of {prefix}.0/24 ...")
-    # Kick off pings in parallel so the ARP table populates quickly
-    try:
-        subprocess.run(
-            f"for /L %i in (1,1,254) do @ping -n 1 -w 200 {prefix}.%i >nul",
-            shell=True, timeout=15
-        )
-    except subprocess.TimeoutExpired:
-        pass
-    # Read ARP table for this subnet
-    found = []
-    try:
-        out = subprocess.check_output(["arp", "-a"], text=True,
-                                      encoding="utf-8", errors="replace")
-        for line in out.splitlines():
-            m = re.match(r"\s+([\d.]+)\s+[\da-f-]{17}\s+dynamic", line, re.I)
-            if m and m.group(1).startswith(prefix_dot):
-                found.append(m.group(1))
-    except Exception:
-        pass
-    return found
-
-
-def arp_table_hosts(my_ip):
-    """Return already-known ARP table entries on the /24 subnet without ping sweep."""
-    prefix_dot = ".".join(my_ip.split(".")[:3]) + "."
-    found = []
-    try:
-        out = subprocess.check_output(["arp", "-a"], text=True,
-                                      encoding="utf-8", errors="replace")
-        for line in out.splitlines():
-            m = re.match(r"\s+([\d.]+)\s+[\da-f-]{17}\s+dynamic", line, re.I)
-            if m and m.group(1).startswith(prefix_dot):
-                found.append(m.group(1))
-    except Exception:
-        pass
-    return found
-
-
-def parse_ports(value):
-    ports = []
-    for item in value.split(","):
-        item = item.strip()
-        if not item:
-            continue
-        try:
-            port = int(item)
-        except ValueError as exc:
-            raise argparse.ArgumentTypeError(f"invalid port: {item!r}") from exc
-        if port < 1 or port > 65535:
-            raise argparse.ArgumentTypeError(f"port out of range: {port}")
-        if port not in ports:
-            ports.append(port)
-    if not ports:
-        raise argparse.ArgumentTypeError("at least one port is required")
-    return ports
-
-
-def parse_csv(value):
-    items = []
-    for item in value.split(","):
-        item = item.strip()
-        if item and item not in items:
-            items.append(item)
-    if not items:
-        raise argparse.ArgumentTypeError("at least one value is required")
-    return items
+def is_windows():
+    return platform.system().lower() == "windows"
 
 
 def command_output(args, timeout=10):
@@ -319,15 +190,7 @@ def command_output(args, timeout=10):
             args, text=True, encoding="utf-8", errors="replace", timeout=timeout
         )
     except Exception as exc:
-        return f"(failed to run {' '.join(args)}: {exc})"
-
-
-def is_linux():
-    return platform.system().lower() == "linux"
-
-
-def is_windows():
-    return platform.system().lower() == "windows"
+        return f"(failed to run {' '.join(str(a) for a in args)}: {exc})"
 
 
 def bluez_args(adapter):
@@ -397,7 +260,183 @@ def list_ble_adapters():
     print(f"Bluetooth adapter listing is not implemented for {platform.system()}.")
 
 
-def print_network_diagnostics(interface, my_ip):
+def parse_ports(value):
+    ports = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            port = int(item)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(f"invalid port: {item!r}") from exc
+        if port < 1 or port > 65535:
+            raise argparse.ArgumentTypeError(f"port out of range: {port}")
+        if port not in ports:
+            ports.append(port)
+    if not ports:
+        raise argparse.ArgumentTypeError("at least one port is required")
+    return ports
+
+
+def parse_csv(value):
+    items = []
+    for item in value.split(","):
+        item = item.strip()
+        if item and item not in items:
+            items.append(item)
+    if not items:
+        raise argparse.ArgumentTypeError("at least one value is required")
+    return items
+
+
+# ── Windows-only netsh helpers ────────────────────────────────────────────────
+
+def netsh(*args, timeout=10):
+    try:
+        return subprocess.check_output(
+            ["netsh"] + list(args),
+            text=True, encoding="utf-8", errors="replace", timeout=timeout
+        )
+    except Exception:
+        return ""
+
+
+def _windows_get_wifi_interface():
+    """Return the name of the first active WLAN interface (e.g. 'Wi-Fi')."""
+    out = netsh("wlan", "show", "interfaces")
+    for line in out.splitlines():
+        m = re.match(r"^\s+Name\s*:\s*(.+)$", line)
+        if m:
+            return m.group(1).strip()
+    return "Wi-Fi"
+
+
+def _windows_get_active_ssid():
+    """Return the SSID the adapter is currently connected to, or None."""
+    out = netsh("wlan", "show", "interfaces")
+    for line in out.splitlines():
+        m = re.match(r"^\s+(?:Profile|SSID)\s*:\s*(.+)$", line)
+        if m:
+            val = m.group(1).strip()
+            if val and val != "Profile":
+                return val
+    return None
+
+
+def _windows_scan_wifi():
+    out = netsh("wlan", "show", "networks", "mode=bssid")
+    networks = {}
+    current_ssid = None
+    for line in out.splitlines():
+        line = line.strip()
+        m = re.match(r"^SSID\s+\d+\s*:\s*(.+)$", line)
+        if m:
+            current_ssid = m.group(1).strip()
+        m2 = re.match(r"^BSSID\s+\d+\s*:\s*([\da-fA-F:]{17})$", line)
+        if m2 and current_ssid:
+            networks[current_ssid] = m2.group(1)
+    return networks
+
+
+def _windows_wait_for_ip(interface, timeout=20):
+    """Wait until the interface has a non-APIPA IP. Returns (my_ip, gateway) or (None, None)."""
+    print(f"  Waiting for DHCP on {interface} ...")
+    for i in range(timeout):
+        time.sleep(1)
+        out = netsh("interface", "ip", "show", "config", f"name={interface}")
+        my_ip = gateway = None
+        for line in out.splitlines():
+            m = re.search(r"IP Address:\s+([\d.]+)", line)
+            if m and not m.group(1).startswith("169.254"):
+                my_ip = m.group(1)
+            m2 = re.search(r"Default Gateway:\s+([\d.]+)", line)
+            if m2 and not m2.group(1).startswith("0.0.0.0"):
+                gateway = m2.group(1)
+        if my_ip:
+            print(f"  My IP  : {my_ip} (after {i+1}s)")
+            print(f"  Gateway: {gateway or '(none yet)'}")
+            return my_ip, gateway
+    return None, None
+
+
+def _windows_arp_scan_subnet(my_ip):
+    """Ping-sweep the /24 subnet and return IPs that reply (from ARP table)."""
+    prefix = ".".join(my_ip.split(".")[:3])
+    prefix_dot = prefix + "."
+    print(f"  ARP scan of {prefix}.0/24 ...")
+    try:
+        subprocess.run(
+            f"for /L %i in (1,1,254) do @ping -n 1 -w 200 {prefix}.%i >nul",
+            shell=True, timeout=15
+        )
+    except subprocess.TimeoutExpired:
+        pass
+    found = []
+    try:
+        out = subprocess.check_output(["arp", "-a"], text=True,
+                                      encoding="utf-8", errors="replace")
+        for line in out.splitlines():
+            m = re.match(r"\s+([\d.]+)\s+[\da-f-]{17}\s+dynamic", line, re.I)
+            if m and m.group(1).startswith(prefix_dot):
+                found.append(m.group(1))
+    except Exception:
+        pass
+    return found
+
+
+def _windows_arp_table_hosts(my_ip):
+    """Return already-known ARP table entries on the /24 subnet without ping sweep."""
+    prefix_dot = ".".join(my_ip.split(".")[:3]) + "."
+    found = []
+    try:
+        out = subprocess.check_output(["arp", "-a"], text=True,
+                                      encoding="utf-8", errors="replace")
+        for line in out.splitlines():
+            m = re.match(r"\s+([\d.]+)\s+[\da-f-]{17}\s+dynamic", line, re.I)
+            if m and m.group(1).startswith(prefix_dot):
+                found.append(m.group(1))
+    except Exception:
+        pass
+    return found
+
+
+def _windows_connect_wifi(ssid, password, interface):
+    """Create a temporary profile and connect. Returns True on success."""
+    xml = (WIFI_PROFILE_OPEN.format(ssid=ssid) if password == ""
+           else WIFI_PROFILE_WPA2.format(ssid=ssid, password=password))
+    tmp = os.path.join(tempfile.gettempdir(), "cam_wifi_profile.xml")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(xml)
+        netsh("wlan", "add", "profile", f"filename={tmp}", "user=current")
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+    print(f"  Connecting to {ssid} on {interface} ...")
+    netsh("wlan", "connect", f"name={ssid}", f"ssid={ssid}", f"interface={interface}")
+
+    for i in range(WIFI_CONNECT_TIMEOUT):
+        time.sleep(1)
+        out = netsh("wlan", "show", "interfaces")
+        for line in out.splitlines():
+            if re.match(r"^\s+SSID\s*:\s*" + re.escape(ssid), line):
+                print(f"  Connected to {ssid} after {i+1}s.")
+                return True
+        if i % 5 == 4:
+            print(f"  ...{i+1}s waiting for connection")
+    return False
+
+
+def _windows_reconnect_wifi(ssid, interface):
+    print(f"  Reconnecting to {ssid} ...")
+    netsh("wlan", "connect", f"name={ssid}", f"ssid={ssid}", f"interface={interface}")
+
+
+def _windows_print_network_diagnostics(interface, my_ip):
     print("\nNetwork diagnostics:")
     config = netsh("interface", "ip", "show", "config", f"name={interface}")
     if config.strip():
@@ -427,6 +466,377 @@ def print_network_diagnostics(interface, my_ip):
             print(f"    {line}")
 
 
+# ── Linux WiFi helpers ────────────────────────────────────────────────────────
+
+def linux_get_wifi_interface(override=None):
+    """Return the interface to use for camera WiFi on Linux.
+
+    Prefers an explicitly specified interface, then the first wlx* USB adapter,
+    then falls back to wlan1.
+    """
+    if override:
+        return override
+    try:
+        out = subprocess.check_output(
+            ["ip", "link", "show"], text=True, errors="replace", timeout=5
+        )
+        for line in out.splitlines():
+            m = re.match(r"^\d+:\s+(wlx\S+):", line)
+            if m:
+                return m.group(1).rstrip(":")
+    except Exception:
+        pass
+    return "wlan1"
+
+
+def linux_get_active_ssid(home_iface="wlan0"):
+    """Return the SSID that the home interface is connected to."""
+    try:
+        out = subprocess.check_output(
+            ["iw", "dev", home_iface, "link"],
+            text=True, errors="replace", timeout=5
+        )
+        for line in out.splitlines():
+            m = re.search(r"SSID:\s+(.+)", line)
+            if m:
+                return m.group(1).strip()
+    except Exception:
+        pass
+    return None
+
+
+def linux_scan_wifi(iface):
+    """Scan for nearby WiFi SSIDs on iface. Returns {ssid: bssid} dict.
+
+    Requires iface to be UP; brings it up if needed. Requires sudo for iw scan.
+    """
+    try:
+        subprocess.run(
+            ["sudo", "ip", "link", "set", iface, "up"],
+            timeout=5, capture_output=True
+        )
+    except Exception:
+        pass
+
+    networks = {}
+    try:
+        out = subprocess.check_output(
+            ["sudo", "iw", "dev", iface, "scan"],
+            text=True, errors="replace", timeout=15,
+            stderr=subprocess.DEVNULL
+        )
+    except subprocess.CalledProcessError as exc:
+        # iw scan returns non-zero on some error conditions but still has output
+        out = exc.output or ""
+    except Exception:
+        return networks
+
+    current_bssid = None
+    for line in out.splitlines():
+        line = line.strip()
+        m = re.match(r"^BSS\s+([\da-fA-F:]{17})", line)
+        if m:
+            current_bssid = m.group(1)
+        m2 = re.search(r"^SSID:\s+(.+)$", line)
+        if m2 and current_bssid:
+            ssid = m2.group(1).strip()
+            if ssid:
+                networks[ssid] = current_bssid
+    return networks
+
+
+def linux_connect_wifi(ssid, password, iface):
+    """Connect iface to ssid using wpa_supplicant + dhcpcd. Returns True on success."""
+    # Build wpa_supplicant config
+    if password == "":
+        network_block = 'network={\n    ssid="%s"\n    key_mgmt=NONE\n}\n' % ssid
+    else:
+        escaped_pw = password.replace("\\", "\\\\").replace('"', '\\"')
+        network_block = (
+            'network={\n'
+            '    ssid="%s"\n'
+            '    psk="%s"\n'
+            '    key_mgmt=WPA-PSK\n'
+            '}\n'
+        ) % (ssid, escaped_pw)
+
+    conf_content = (
+        "ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev\n"
+        "update_config=1\n"
+        + network_block
+    )
+
+    conf_path = "/tmp/cam_wpa.conf"
+    try:
+        with open(conf_path, "w") as f:
+            f.write(conf_content)
+    except OSError as exc:
+        print(f"  Failed to write wpa_supplicant config: {exc}")
+        return False
+
+    # Kill any existing wpa_supplicant on this interface
+    _linux_kill_wpa_supplicant(iface)
+
+    # Bring interface up
+    try:
+        subprocess.run(["sudo", "ip", "link", "set", iface, "up"], timeout=5, check=True)
+    except Exception as exc:
+        print(f"  ip link set {iface} up failed: {exc}")
+        return False
+
+    print(f"  Starting wpa_supplicant on {iface} for {ssid!r} ...")
+    try:
+        subprocess.run(
+            ["sudo", "wpa_supplicant", "-B", "-i", iface,
+             "-c", conf_path, "-D", "nl80211,wext"],
+            timeout=10, check=True, capture_output=True
+        )
+    except Exception as exc:
+        print(f"  wpa_supplicant failed: {exc}")
+        return False
+
+    # Wait for association
+    for i in range(WIFI_CONNECT_TIMEOUT):
+        time.sleep(1)
+        try:
+            out = subprocess.check_output(
+                ["iw", "dev", iface, "link"],
+                text=True, errors="replace", timeout=5
+            )
+            if "Connected to" in out or "SSID" in out:
+                # Check it's the right SSID
+                for line in out.splitlines():
+                    m = re.search(r"SSID:\s+(.+)", line)
+                    if m and m.group(1).strip() == ssid:
+                        print(f"  Connected to {ssid} after {i+1}s.")
+                        return True
+        except Exception:
+            pass
+        if i % 5 == 4:
+            print(f"  ...{i+1}s waiting for association")
+    print(f"  wpa_supplicant timed out after {WIFI_CONNECT_TIMEOUT}s.")
+    return False
+
+
+def linux_wait_for_ip(iface, timeout=20):
+    """Wait until iface has a non-APIPA IP. Returns (my_ip, gateway) or (None, None)."""
+    print(f"  Requesting DHCP on {iface} (dhcpcd) ...")
+    try:
+        subprocess.run(
+            ["sudo", "dhcpcd", "-1", iface],
+            timeout=timeout + 5, capture_output=True
+        )
+    except subprocess.TimeoutExpired:
+        pass
+    except Exception as exc:
+        print(f"  dhcpcd error: {exc}")
+
+    for i in range(timeout):
+        time.sleep(1)
+        try:
+            out = subprocess.check_output(
+                ["ip", "addr", "show", iface],
+                text=True, errors="replace", timeout=5
+            )
+            for line in out.splitlines():
+                m = re.search(r"inet\s+([\d.]+)/\d+", line)
+                if m and not m.group(1).startswith("169.254"):
+                    my_ip = m.group(1)
+                    gateway = _linux_get_gateway(iface)
+                    print(f"  My IP  : {my_ip} (after {i+1}s)")
+                    print(f"  Gateway: {gateway or '(none yet)'}")
+                    return my_ip, gateway
+        except Exception:
+            pass
+    return None, None
+
+
+def _linux_get_gateway(iface):
+    """Return the default gateway for iface, or None."""
+    try:
+        out = subprocess.check_output(
+            ["ip", "route", "show", "dev", iface],
+            text=True, errors="replace", timeout=5
+        )
+        for line in out.splitlines():
+            m = re.search(r"default via\s+([\d.]+)", line)
+            if m:
+                return m.group(1)
+            # Also handle "192.168.8.0/24 via 192.168.8.1 ..." style
+            m2 = re.search(r"via\s+([\d.]+)", line)
+            if m2:
+                return m2.group(1)
+    except Exception:
+        pass
+    return None
+
+
+def linux_arp_table_hosts(my_ip):
+    """Return hosts already in the ARP/neighbor table on the /24 subnet."""
+    prefix_dot = ".".join(my_ip.split(".")[:3]) + "."
+    found = []
+    try:
+        out = subprocess.check_output(
+            ["ip", "neigh", "show"],
+            text=True, errors="replace", timeout=5
+        )
+        for line in out.splitlines():
+            m = re.match(r"([\d.]+)\s+", line)
+            if m and m.group(1).startswith(prefix_dot) and m.group(1) != my_ip:
+                if m.group(1) not in found:
+                    found.append(m.group(1))
+    except Exception:
+        pass
+    return found
+
+
+def linux_arp_scan_subnet(my_ip, iface):
+    """Ping-sweep the /24 subnet via iface and return IPs that appear in neigh table."""
+    prefix = ".".join(my_ip.split(".")[:3])
+    prefix_dot = prefix + "."
+    print(f"  ARP scan of {prefix}.0/24 on {iface} ...")
+    procs = []
+    try:
+        for i in range(1, 255):
+            p = subprocess.Popen(
+                ["ping", "-c", "1", "-W", "1", "-I", iface, f"{prefix}.{i}"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            procs.append(p)
+        for p in procs:
+            try:
+                p.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                p.kill()
+    except Exception:
+        pass
+
+    found = []
+    try:
+        out = subprocess.check_output(
+            ["ip", "neigh", "show"],
+            text=True, errors="replace", timeout=5
+        )
+        for line in out.splitlines():
+            m = re.match(r"([\d.]+)\s+", line)
+            if m and m.group(1).startswith(prefix_dot) and m.group(1) != my_ip:
+                if m.group(1) not in found:
+                    found.append(m.group(1))
+    except Exception:
+        pass
+    return found
+
+
+def _linux_kill_wpa_supplicant(iface):
+    """Kill any wpa_supplicant running on iface."""
+    try:
+        pid_file = f"/run/wpa_supplicant/{iface}.pid"
+        if os.path.exists(pid_file):
+            subprocess.run(["sudo", "wpa_cli", "-i", iface, "terminate"],
+                           timeout=5, capture_output=True)
+            time.sleep(0.5)
+        # Also try killing by process search as fallback
+        subprocess.run(
+            ["sudo", "pkill", "-f", f"wpa_supplicant.*{iface}"],
+            timeout=5, capture_output=True
+        )
+        time.sleep(0.3)
+    except Exception:
+        pass
+
+
+def linux_disconnect_wifi(iface):
+    """Tear down the camera WiFi connection on iface (wlan0 is unaffected)."""
+    print(f"  Disconnecting {iface} from camera network ...")
+    _linux_kill_wpa_supplicant(iface)
+    try:
+        subprocess.run(["sudo", "dhcpcd", "-k", iface],
+                       timeout=10, capture_output=True)
+    except Exception:
+        pass
+    try:
+        subprocess.run(["sudo", "ip", "link", "set", iface, "down"],
+                       timeout=5, capture_output=True)
+    except Exception:
+        pass
+
+
+def linux_print_network_diagnostics(iface, my_ip):
+    print("\nNetwork diagnostics:")
+    for cmd, label in [
+        (["ip", "addr", "show", iface], f"ip addr show {iface}"),
+        (["ip", "route", "show", "dev", iface], f"ip route show dev {iface}"),
+        (["ip", "neigh", "show"], "ip neigh show"),
+    ]:
+        out = command_output(cmd)
+        if out.strip() and not out.startswith("(failed"):
+            print(f"  {label}:")
+            prefix = ".".join(my_ip.split(".")[:3]) + "."
+            for line in out.splitlines():
+                if line.strip() and (prefix in line or "addr" in cmd or "route" in cmd):
+                    print(f"    {line}")
+
+
+# ── Platform-dispatching WiFi API ─────────────────────────────────────────────
+
+def get_wifi_interface(override=None):
+    if is_linux():
+        return linux_get_wifi_interface(override)
+    return _windows_get_wifi_interface()
+
+
+def get_active_ssid(home_iface="wlan0"):
+    if is_linux():
+        return linux_get_active_ssid(home_iface)
+    return _windows_get_active_ssid()
+
+
+def scan_wifi(iface=None):
+    if is_linux():
+        return linux_scan_wifi(iface or "wlan0")
+    return _windows_scan_wifi()
+
+
+def connect_wifi(ssid, password, interface):
+    if is_linux():
+        return linux_connect_wifi(ssid, password, interface)
+    return _windows_connect_wifi(ssid, password, interface)
+
+
+def wait_for_ip(interface, timeout=20):
+    if is_linux():
+        return linux_wait_for_ip(interface, timeout)
+    return _windows_wait_for_ip(interface, timeout)
+
+
+def arp_table_hosts(my_ip, iface=None):
+    if is_linux():
+        return linux_arp_table_hosts(my_ip)
+    return _windows_arp_table_hosts(my_ip)
+
+
+def arp_scan_subnet(my_ip, iface=None):
+    if is_linux():
+        return linux_arp_scan_subnet(my_ip, iface or "wlan0")
+    return _windows_arp_scan_subnet(my_ip)
+
+
+def reconnect_wifi(ssid, interface):
+    if is_linux():
+        linux_disconnect_wifi(interface)
+    else:
+        _windows_reconnect_wifi(ssid, interface)
+
+
+def print_network_diagnostics(interface, my_ip):
+    if is_linux():
+        linux_print_network_diagnostics(interface, my_ip)
+    else:
+        _windows_print_network_diagnostics(interface, my_ip)
+
+
+# ── TCP / HTTP / RTSP probes ──────────────────────────────────────────────────
+
 def tcp_port_scan(candidate_ips, ports, timeout):
     print("\nTCP port scan:")
     results = {}
@@ -451,44 +861,6 @@ def tcp_port_scan(candidate_ips, ports, timeout):
             f"refused={refused}; no-response={timed_out}"
         )
     return results
-
-
-def connect_wifi(ssid, password, interface):
-    """Create a temporary profile and connect. Returns True on success."""
-    xml = (WIFI_PROFILE_OPEN.format(ssid=ssid) if password == ""
-           else WIFI_PROFILE_WPA2.format(ssid=ssid, password=password))
-    tmp = os.path.join(tempfile.gettempdir(), "cam_wifi_profile.xml")
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(xml)
-        netsh("wlan", "add", "profile", f"filename={tmp}", "user=current")
-    finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-
-    print(f"  Connecting to {ssid} on {interface} ...")
-    netsh("wlan", "connect", f"name={ssid}", f"ssid={ssid}", f"interface={interface}")
-
-    for i in range(WIFI_CONNECT_TIMEOUT):
-        time.sleep(1)
-        out = netsh("wlan", "show", "interfaces")
-        connected = ("State" in out and "connected" in out and
-                     f"SSID" in out)
-        # confirm we're on the right SSID
-        for line in out.splitlines():
-            if re.match(r"^\s+SSID\s*:\s*" + re.escape(ssid), line):
-                print(f"  Connected to {ssid} after {i+1}s.")
-                return True
-        if i % 5 == 4:
-            print(f"  ...{i+1}s waiting for connection")
-    return False
-
-
-def reconnect_wifi(ssid, interface):
-    print(f"  Reconnecting to {ssid} ...")
-    netsh("wlan", "connect", f"name={ssid}", f"ssid={ssid}", f"interface={interface}")
 
 
 def probe_http_api(candidate_ips, http_ports, open_ports_by_ip, timeout):
@@ -643,12 +1015,31 @@ def finish_camera_session(
     stop_keepalive(keepalive_stop, keepalive_thread)
     if send_standby:
         send_standby_now(camera_ip)
-    if not no_reconnect and home_ssid:
-        print()
-        reconnect_wifi(home_ssid, interface)
-    elif not no_reconnect:
-        print("\n(No home network to reconnect to — staying on camera WiFi)")
+    if not no_reconnect:
+        if is_linux():
+            # wlan0 was never touched; just tear down the camera interface
+            linux_disconnect_wifi(interface)
+        elif home_ssid:
+            print()
+            reconnect_wifi(home_ssid, interface)
+        else:
+            print("\n(No home network to reconnect to — staying on camera WiFi)")
+    else:
+        print(f"\n(--no-reconnect: leaving {interface} as-is)")
 
+
+# ── WiFi scan display ─────────────────────────────────────────────────────────
+
+def print_networks(networks, label):
+    if not networks:
+        print(f"  {label}: (none visible)")
+        return
+    print(f"  {label}:")
+    for ssid, bssid in sorted(networks.items()):
+        print(f"    {ssid:<40} {bssid}")
+
+
+# ── Media download helpers ────────────────────────────────────────────────────
 
 def extension_for_response(path, content_type):
     lower_type = (content_type or "").lower()
@@ -831,7 +1222,7 @@ def probe_http_paths(
                         append = bool(headers) and resp.status_code == 206
                         if headers and not append:
                             print("    Range not honored; restarting local file")
-                        chunk = b"" 
+                        chunk = b""
                         chunk_iter = resp.iter_content(chunk_size=64 * 1024)
                         for chunk in chunk_iter:
                             break
@@ -941,17 +1332,6 @@ def probe_rtsp(candidate_ips, open_ports_by_ip, paths, timeout):
     return confirmed
 
 
-# ── WiFi scan display ─────────────────────────────────────────────────────────
-
-def print_networks(networks, label):
-    if not networks:
-        print(f"  {label}: (none visible)")
-        return
-    print(f"  {label}:")
-    for ssid, bssid in sorted(networks.items()):
-        print(f"    {ssid:<40} {bssid}")
-
-
 # ── BLE ───────────────────────────────────────────────────────────────────────
 
 def expected_ssid(address):
@@ -995,7 +1375,7 @@ async def wake(
     skip_http_probe,
     skip_rtsp_probe,
     rtsp_paths,
-    arp_scan,
+    do_arp_scan,
     fast_only,
     save_samples,
     save_dir,
@@ -1008,10 +1388,11 @@ async def wake(
     cmd_probe_paths,
     cmd_probe_only,
     ble_adapter,
+    wifi_interface,
 ):
     responses = []
     ssid = expected_ssid(address)
-    interface = get_wifi_interface()
+    interface = wifi_interface  # already resolved in main()
 
     def on_notify(char, data):
         text = data.decode(errors="replace")
@@ -1021,10 +1402,13 @@ async def wake(
     # Baseline
     print_ble_adapter_warning(ble_adapter)
     print(f"WiFi interface : {interface}")
-    print(f"Home network   : {home_ssid or '(none detected)'}")
+    if is_linux():
+        print(f"Home network   : {home_ssid or '(wlan0 not connected)'} (wlan0 — unaffected)")
+    else:
+        print(f"Home network   : {home_ssid or '(none detected)'}")
     print(f"Camera hotspot : {ssid}\n")
 
-    wifi_before = scan_wifi()
+    wifi_before = scan_wifi(interface)
     hotspot_already_up = ssid in wifi_before
 
     ble_label = getattr(address, "address", address)
@@ -1070,7 +1454,7 @@ async def wake(
         found = hotspot_already_up
         for i in range(wait_secs):
             await asyncio.sleep(1)
-            after = scan_wifi()
+            after = scan_wifi(interface)
             if ssid in after:
                 if not found:
                     print(f"\n*** Hotspot appeared after {i+1}s: {ssid}  [{after[ssid]}] ***")
@@ -1081,16 +1465,20 @@ async def wake(
 
         if not found:
             print(f"\nHotspot {ssid!r} not detected after {wait_secs}s.")
-            print_networks(scan_wifi(), "Visible networks")
+            print_networks(scan_wifi(interface), "Visible networks")
             return
 
     # BLE session ends here — camera WiFi is up, no need to hold BLE open
     if wake_only or password is None:
         print(f"\nHotspot is up: {ssid}")
-        print(f"Connect your laptop to it now, then re-run with -p <password> to auto-probe.")
+        print(f"Connect to it now, then re-run with -p <password> to auto-probe.")
+        if is_linux():
+            print(f"  sudo ip link set {interface} up")
+            print(f"  sudo wpa_supplicant -B -i {interface} -c /tmp/cam_wpa.conf -D nl80211")
+            print(f"  # (create /tmp/cam_wpa.conf with SSID={ssid})")
         return
 
-    print(f"\nConnecting laptop to {ssid} ...")
+    print(f"\nConnecting {interface} to {ssid} ...")
     if not connect_wifi(ssid, password, interface):
         print(f"  Failed to connect to {ssid}. Check password and try again.")
         return
@@ -1109,7 +1497,8 @@ async def wake(
         likely_gateway = ".".join(my_ip.split(".")[:3]) + ".1"
         if likely_gateway != my_ip and likely_gateway not in candidates:
             candidates.append(likely_gateway)
-    arp_hosts = arp_scan_subnet(my_ip) if arp_scan else arp_table_hosts(my_ip)
+    arp_hosts = (arp_scan_subnet(my_ip, interface) if do_arp_scan
+                 else arp_table_hosts(my_ip, interface))
     for h in arp_hosts:
         if h not in candidates and h != my_ip:
             candidates.append(h)
@@ -1147,10 +1536,21 @@ async def wake(
             print("\nManual session mode is active.")
             print(f"Camera HTTP base : {base_url}")
             print(f"Camera RTSP live : rtsp://{candidates[0]}:554/live.sdp")
+            if is_linux():
+                print(
+                    f"\nTo browse from your laptop via SSH port forward:\n"
+                    f"  ssh -L 18080:{candidates[0]}:8080"
+                    f" -L 18554:{candidates[0]}:554 -N khaney@192.168.86.73\n"
+                    f"  Then open: http://localhost:18080/cmd/getSetting\n"
+                    f"\nOr SOCKS5 proxy for full subnet access:\n"
+                    f"  ssh -D 1080 -N khaney@192.168.86.73\n"
+                    f"  Configure browser SOCKS5: localhost:1080\n"
+                    f"  Then open: http://{candidates[0]}:8080/cmd/getSetting"
+                )
             if keepalive_interval > 0:
-                print("Keepalive is running. Press Ctrl-C to stop.")
+                print("\nKeepalive is running. Press Ctrl-C to stop.")
             else:
-                print("No keepalive interval set. Press Ctrl-C to stop.")
+                print("\nNo keepalive interval set. Press Ctrl-C to stop.")
             while True:
                 await asyncio.sleep(1)
 
@@ -1275,12 +1675,16 @@ async def main():
                         help="Bluetooth adapter to use on Linux/BlueZ, e.g. hci0 or hci1")
     parser.add_argument("--list-ble-adapters", action="store_true",
                         help="List visible Bluetooth adapters/devices and exit")
+    parser.add_argument("--wifi-interface",
+                        help="Network interface for camera WiFi "
+                             "(Linux default: first wlx* adapter; Windows: auto-detected)")
     parser.add_argument("-p", "--password", default=None,
                         help="Camera WiFi password; use \"\" for open/no-password network")
     parser.add_argument("-r", "--reconnect", default=None,
-                        help="Home SSID to reconnect to when done (default: auto-detected)")
+                        help="Home SSID to reconnect to when done (default: auto-detected; "
+                             "Linux: informational only, wlan0 is never disconnected)")
     parser.add_argument("--no-reconnect", action="store_true",
-                        help="Stay on camera WiFi when done")
+                        help="Stay on camera WiFi when done (Linux: leave camera iface UP)")
     parser.add_argument("--probe", action="store_true",
                         help="Send AT WiFi config queries before wake command")
     parser.add_argument("--wait", type=int, default=HOTSPOT_POLL_SECS_DEFAULT,
@@ -1316,7 +1720,8 @@ async def main():
                         metavar="SECS",
                         help="Periodically GET /cmd/standby/reset on port 8080; 0 disables")
     parser.add_argument("--hold-session", action="store_true",
-                        help="Connect to camera WiFi and keep the session open until Ctrl-C")
+                        help="Connect to camera WiFi and keep the session open until Ctrl-C "
+                             "(prints SSH tunnel commands on Linux)")
     parser.add_argument("--cmd-probe", action="store_true",
                         help="Run read-only /cmd status/settings probes after DHCP")
     parser.add_argument("--cmd-probe-only", action="store_true",
@@ -1360,6 +1765,7 @@ async def main():
         if not address:
             return
 
+        wifi_iface = get_wifi_interface(args.wifi_interface)
         home_ssid = args.reconnect or get_active_ssid()
         await wake(
             address,
@@ -1390,6 +1796,7 @@ async def main():
             args.cmd_probe_paths,
             args.cmd_probe_only,
             args.ble_adapter,
+            wifi_iface,
         )
     finally:
         if log_handle:

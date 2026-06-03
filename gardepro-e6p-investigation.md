@@ -331,7 +331,7 @@ GET http://192.168.8.1:8080/file/39/MP4
 
 ## Scripts
 
-All scripts in `C:\development\home\gardepro\`:
+All scripts in the repository root (works on Windows and Linux):
 
 | Script | Purpose |
 |---|---|
@@ -342,6 +342,11 @@ All scripts in `C:\development\home\gardepro\`:
 
 ### ble_wake.py usage
 
+`--wifi-interface <iface>` selects the adapter used for camera WiFi. On Linux it
+defaults to the first `wlx*` USB adapter found; on Windows it is auto-detected and
+this flag is not needed.
+
+**Windows:**
 ```
 python ble_wake.py                             # wake + wait for hotspot
 python ble_wake.py --wake-only                 # wake, exit once hotspot visible
@@ -354,7 +359,6 @@ python ble_wake.py -p <pw> -r <home-ssid>      # explicit home network to return
 python ble_wake.py --probe                     # AT probe (debug only — may confuse camera)
 python ble_wake.py -p <password> --skip-http-probe  # port scan only
 python ble_wake.py --list-ble-adapters         # show Bluetooth adapter status
-python ble_wake.py --ble-adapter hci1 -p <password>  # Linux/Pi explicit adapter
 python ble_wake.py -p <password> --no-reconnect --wait 90 --fast-only --save-samples --resume-samples --max-download-mb 250 --download-timeout 180
 python ble_wake.py -p <password> --no-reconnect --wait 90 --fast-only --save-samples --resume-samples --keepalive-interval 30 --max-download-mb 250 --download-timeout 180
 python ble_wake.py -p <password> --no-reconnect --wait 90 --hold-session --keepalive-interval 30
@@ -362,15 +366,72 @@ python ble_wake.py -p <password> --no-reconnect --wait 90 --cmd-probe-only --kee
 python ble_wake.py -p <password> --no-reconnect --wait 90 --cmd-probe --fast-only
 ```
 
+**Linux / Raspberry Pi** (Edimax adapter for camera; `wlan0` stays on home network):
+```bash
+python3 ble_wake.py --address <camera-ble-address> --ble-adapter hci0 \
+  --wifi-interface <usb-wifi-iface> -p <password>          # wake + connect + fast probe
+
+python3 ble_wake.py --address <camera-ble-address> --ble-adapter hci0 \
+  --wifi-interface <usb-wifi-iface> -p <pw> --wake-only    # wake only, no connect
+
+python3 ble_wake.py --address <camera-ble-address> --ble-adapter hci0 \
+  --wifi-interface <usb-wifi-iface> -p <pw> \
+  --hold-session --keepalive-interval 60                  # keep session open
+
+python3 ble_wake.py --list-ble-adapters                   # show hci adapters
+```
+
 After the script has connected to the camera WiFi session, normal exit or Ctrl-C
-stops the keepalive thread and sends `GET /cmd/standby/now` before reconnecting
-to the home network, unless `--no-reconnect` is set.
+stops the keepalive thread and sends `GET /cmd/standby/now`. On Windows it then
+reconnects to the home network; on Linux it tears down the camera interface while
+`wlan0` remains connected to the home network throughout.
 
 ### Dependencies
+
+**Windows:**
 ```
 pip install bleak requests
 ```
-Python: `C:/Python312/python.exe` (Windows) or `python3` (other)
+Python: `C:/Python312/python.exe`
+
+**Raspberry Pi / Debian / Ubuntu:**
+```bash
+sudo apt-get install -y python3-bleak
+# requests is pre-installed on Ubuntu-based Pi images; if not:
+# sudo apt-get install -y python3-requests
+```
+Python: `python3`
+
+### Pi / Linux setup
+
+On a Raspberry Pi (or other Linux host), the script manages the camera WiFi on a
+**dedicated USB adapter** while the built-in WiFi stays on the home network throughout.
+
+Tested configuration (Raspberry Pi):
+- `wlan0` — built-in adapter, stays on home network (managed by netplan); never touched
+- `<usb-wifi-iface>` — Edimax USB adapter, used only for the camera hotspot
+- `hci0` — built-in Bluetooth (UART), used for BLE wake
+
+The `--wifi-interface` argument selects the camera adapter. On Linux it defaults to
+the first `wlx*` interface found via `ip link show`.
+
+Required tools (available by default on Raspberry Pi OS): `wpa_supplicant`, `dhcpcd`, `iw`.
+The script calls these with `sudo`; configure `NOPASSWD` in sudoers or enter the password
+when prompted.
+
+**Browsing the camera from a laptop while the Pi holds the session:**
+
+```bash
+# SSH port forward — open specific ports, no browser config needed:
+ssh -L 18080:192.168.8.1:8080 -L 18554:192.168.8.1:554 -N user@<pi-ip>
+# Then open: http://localhost:18080/cmd/getSetting
+#      RTSP: rtsp://localhost:18554/live.sdp
+
+# SSH SOCKS5 proxy — full access to the 192.168.8.x subnet:
+ssh -D 1080 -N user@<pi-ip>
+# Configure browser SOCKS5: localhost:1080
+# Then browse: http://192.168.8.1:8080/cmd/getSetting
+```
 
 ---
 

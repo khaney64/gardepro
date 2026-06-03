@@ -10,6 +10,9 @@ media, and generated dumps are intentionally excluded from git. Those files are
 large and may contain device identifiers, local network details, or other private
 state that is not appropriate for a public repository.
 
+Both scripts work on Windows and Linux (including Raspberry Pi). See the Scripts section
+in `gardepro-e6p-investigation.md` for platform-specific setup and usage.
+
 ## Files
 
 - `ble_scan.py` scans nearby BLE devices and prints names, addresses, and RSSI.
