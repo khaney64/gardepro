@@ -288,9 +288,35 @@ GET http://192.168.8.1:8080/cmd/upgrade/start          # mutating; not probed
 ```
 
 The APK exposes `/cmd/setGmtClock` and `/cmd/setSetting`, but string analysis has
-not revealed their parameter format. The safest next step is to capture app HTTP
-traffic while using "sync time" or changing one harmless setting, then replay the
-observed camera-local URL.
+not revealed their parameter format.
+
+**Write command testing results (2026-06-03):**
+
+All write command attempts return error codes regardless of parameter format:
+- `GET /cmd/setGmtClock?<any params>` → `{"code": -3}` — including with no params at all
+- `GET /cmd/setSetting?pir=<0|1|2|high|medium|low>` → `{"code": -2}`
+- `GET /cmd/setSetting?field=pir&value=high` → `{"code": -2}`
+
+Confirmed root cause: write commands require a session token from the **BLE Level
+1–3 handshake** (ECDH + ChaCha20). Our Level 0 wake-only connection never
+establishes this token. Read commands (getSetting, thumb, file, delete) work without
+auth — only write commands are gated.
+
+Traffic capture attempts:
+- Phone system proxy (mitmproxy): app manages WiFi via WifiManager, ignores system proxy
+- ARP spoof + tcpdump: camera hotspot allows only **one WiFi client** simultaneously
+- WiFi 802.11 monitor mode: phone uses PMKID fast-reconnect; 4-way handshake not
+  captured across four separate capture attempts
+- PCAPdroid: app detects PCAPdroid's VPN interface and refuses to connect
+
+**Side finding:** during 802.11 monitor mode capture, the camera MAC
+(`0c:cf:89:7e:e9:c3`, vendor prefix BilianElectr) was observed sending Probe
+Requests for `HaneyNet` — the camera may have a STA (client) mode in addition to
+AP (hotspot) mode. If the camera can join the home WiFi network directly, it could
+be accessed without BLE wake or the Edimax adapter at all.
+
+To unblock write commands: implement BLE Level 1–3 using key material in
+`secret_g5a6r7p8r9o.dart`, or capture from a rooted Android device.
 
 The app creates phone-local proxy ports:
 - API proxy: `127.0.0.1:41137`

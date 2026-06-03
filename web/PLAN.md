@@ -99,15 +99,57 @@ the camera serves the same underlying media either way.
 
 ---
 
-## Phase 2 — Settings Write (planned)
+## Phase 2 — Settings Write ⏸ Deferred
 
 - Display of all `getSetting` / `getParaSetting` fields — ✅ done
-- **Format SD card** — ✅ done  
-- **Sync camera time** via `/cmd/setGmtClock` — ⏳ blocked pending parameter format
-  - Need to capture one real HTTP request from the GardePro app (Wireshark or
-    mitmproxy) to confirm the parameter format before implementing
-- **Write settings** via `/cmd/setSetting` — ⏳ same blocker
-- Editable settings fields in UI (photo quality, video length, PIR, etc.)
+- **Format SD card** (`/cmd/format/start`) — ✅ done
+- **Sync camera time** via `/cmd/setGmtClock` — ❌ blocked (see below)
+- **Write settings** via `/cmd/setSetting` — ❌ blocked (same root cause)
+- Editable settings fields in UI (photo quality, video length, PIR, etc.) — ❌ deferred
+
+### Root cause: BLE Level 1–3 authentication required for write commands
+
+Extensive testing confirmed that `/cmd/setGmtClock` and `/cmd/setSetting` return
+error codes regardless of URL parameter format:
+
+| Endpoint | Error | Meaning |
+|---|---|---|
+| `/cmd/setGmtClock?<any params>` | `code: -3` | Auth rejected — even with no params |
+| `/cmd/setSetting?pir=<any value>` | `code: -2` | Auth rejected or invalid params |
+
+The GardePro app goes through **BLE Level 1–3** (ECDH key exchange + ChaCha20
+session) before WiFi connection. This handshake produces a session token the app
+includes in write HTTP requests. Our Level 0 wake-only BLE connection never
+establishes this token, so write commands are rejected.
+
+Read commands (getSetting, getParaSetting, thumb, file, delete) work without auth —
+only write commands are gated.
+
+### Traffic capture attempts (all unsuccessful)
+
+| Method | Outcome |
+|---|---|
+| mitmproxy + phone system proxy | GardePro app manages WiFi itself (WifiManager API), ignores system proxy |
+| ARP spoof + tcpdump on Edimax | Camera hotspot only allows **one WiFi client** — Pi joining kicks phone off |
+| WiFi monitor mode (Edimax) + WPA2 decrypt | Phone uses PMKID fast-reconnect; 4-way handshake never captured across 4 attempts |
+| PCAPdroid (Android traffic capture) | App detects the VPN interface PCAPdroid requires and refuses to connect |
+
+### Side discovery: camera scans for home WiFi
+
+During monitor mode capture, the camera MAC (`0c:cf:89:7e:e9:c3`) was observed
+sending 802.11 Probe Requests for `HaneyNet` — suggesting the camera has a
+dual-mode capability (AP hotspot + STA client to home WiFi). This may be relevant
+for Phase 3 (auto-connect without BLE wake if camera joins home network directly).
+
+### Path to unblock
+
+To implement write commands, one of:
+1. **Implement BLE Level 1–3 auth** — ECDH + ChaCha20 using key material in the
+   APK (`secret_g5a6r7p8r9o.dart`). Significant reverse-engineering work.
+2. **Capture traffic from a rooted Android** — `adb shell tcpdump` on a rooted
+   device would bypass all WiFi/VPN capture limitations.
+3. **Accept write limitation** — Format SD (already working) covers the most
+   destructive operation; time sync and settings write remain manual via the app.
 
 ---
 
