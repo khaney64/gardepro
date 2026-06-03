@@ -182,8 +182,16 @@ header {
 }
 .video-badge {
   position: absolute; bottom: 6px; left: 6px;
-  background: rgba(0,0,0,.6); color: #fff;
-  border-radius: 4px; font-size: .75em; padding: 2px 6px;
+  background: rgba(220,80,0,.88); color: #fff;
+  border-radius: 4px; font-size: .72em; padding: 3px 7px;
+  font-weight: 700; letter-spacing: .03em;
+}
+.thumb-card[data-media-kind="mp4"] {
+  outline: 2px solid rgba(220,80,0,.35);
+}
+.lb-error {
+  color: rgba(255,255,255,.7);
+  text-align: center; padding: 40px 20px; font-size: 1em; line-height: 1.6;
 }
 .thumb-check {
   position: absolute; top: 6px; right: 6px;

@@ -85,6 +85,7 @@ _connect_task:      Optional[asyncio.Task] = None
 _background_tasks:  list[asyncio.Task] = []
 _rtsp_server       = None
 _hls_proc          = None
+_shutting_down      = False
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -245,21 +246,23 @@ async def _enumerate_media() -> list[dict]:
     media_id = 1
 
     while misses < MAX_MISSES:
+        # Probe /file/ (not /thumb/) — both /JPG and /MP4 suffixes return the
+        # same underlying file; Content-Type tells us the actual type.
+        url = f"http://{CAMERA_IP}:{CAMERA_PORT}/file/{media_id}/JPG"
         found = False
-        for kind in ("JPG", "MP4"):
-            url = f"http://{CAMERA_IP}:{CAMERA_PORT}/thumb/{media_id}/{kind}"
-            try:
-                resp = await asyncio.to_thread(
-                    lambda u=url: _cam_session.get(u, timeout=1.5, stream=True)
-                )
-                code = resp.status_code
-                resp.close()
-                if code == 200:
-                    results.append({"id": media_id, "kind": kind.lower()})
-                    found = True
-                    break
-            except Exception:
-                pass
+        try:
+            resp = await asyncio.to_thread(
+                lambda u=url: _cam_session.get(u, timeout=1.5, stream=True)
+            )
+            code = resp.status_code
+            ct = resp.headers.get("content-type", "").lower()
+            resp.close()
+            if code == 200:
+                kind = "mp4" if "video" in ct else "jpg"
+                results.append({"id": media_id, "kind": kind})
+                found = True
+        except Exception:
+            pass
 
         misses = 0 if found else misses + 1
         media_id += 1
@@ -329,12 +332,30 @@ async def _connection_flow():
             raise RuntimeError("WiFi connection failed — check password.")
 
         await _set_step("Waiting for DHCP…")
-        my_ip, _ = await asyncio.to_thread(linux_wait_for_ip, iface)
+        my_ip, _ = await asyncio.to_thread(linux_wait_for_ip, iface, 40)
         if not my_ip:
-            raise RuntimeError("DHCP timed out on camera interface.")
+            raise RuntimeError("DHCP timed out — camera may need more time. Try again.")
 
         _state["camera_ip"] = CAMERA_IP
         _state["my_ip"] = my_ip
+
+        await _set_step("Verifying camera HTTP…")
+        try:
+            probe = await asyncio.to_thread(
+                lambda: _cam_session.get(
+                    f"http://{CAMERA_IP}:{CAMERA_PORT}/cmd/getSetting", timeout=5
+                )
+            )
+            if probe.status_code >= 500:
+                raise RuntimeError(
+                    f"Camera returned HTTP {probe.status_code} — WiFi session may have expired."
+                )
+        except requests.exceptions.ConnectionError:
+            raise RuntimeError(
+                "Camera not responding at 192.168.8.1:8080 — session may have timed out. Try again."
+            )
+        except requests.exceptions.Timeout:
+            raise RuntimeError("Camera HTTP timed out. Try disconnecting and reconnecting.")
 
         await _set_step("Scanning media library…")
         await _enumerate_media()
@@ -433,21 +454,46 @@ async def lifespan(app: FastAPI):
         m = re.search(r"inet\s+(192\.168\.8\.\d+)/", out)
         if m:
             my_ip = m.group(1)
+            # Stay in "connecting" until _resume_session finishes enumeration
             _state.update({
-                "status": "connected", "camera_ip": CAMERA_IP, "my_ip": my_ip,
+                "status": "connecting", "camera_ip": CAMERA_IP, "my_ip": my_ip,
             })
-            # Resume in background so startup completes immediately
             asyncio.ensure_future(_resume_session(iface, my_ip))
     except Exception:
         pass
 
     yield
 
-    # Shutdown — cancel background tasks
+    # Shutdown (CTRL-C / SIGTERM) — signal SSE clients to close, then clean up
+    global _shutting_down
+    _shutting_down = True
+    for q in list(_sse_queues):
+        try:
+            q.put_nowait(None)  # None sentinel causes generators to exit
+        except Exception:
+            pass
+    await asyncio.sleep(0.3)  # brief pause for generators to drain
+
     for t in _background_tasks:
         t.cancel()
     await _stop_hls()
     await _stop_rtsp_proxy()
+
+    if _state["status"] in ("connected", "connecting"):
+        iface = linux_get_wifi_interface(WIFI_IFACE_OVERRIDE)
+        try:
+            await asyncio.to_thread(
+                lambda: _cam_session.get(
+                    f"http://{CAMERA_IP}:{CAMERA_PORT}/cmd/standby/now",
+                    timeout=(1.0, 3.0)
+                )
+            )
+        except Exception:
+            pass
+        try:
+            await asyncio.to_thread(linux_disconnect_wifi, iface)
+        except Exception:
+            pass
 
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
@@ -472,8 +518,12 @@ async def api_events(request: Request):
             while True:
                 try:
                     msg = await asyncio.wait_for(q.get(), timeout=15)
+                    if msg is None:  # shutdown sentinel — close gracefully
+                        break
                     yield f"data: {msg}\n\n"
                 except asyncio.TimeoutError:
+                    if _shutting_down:
+                        break
                     yield ": ping\n\n"
                 if await request.is_disconnected():
                     break
@@ -653,20 +703,23 @@ async def api_hls_start():
     if not _state["hls_available"]:
         raise HTTPException(501, "ffmpeg not installed — run: sudo apt-get install ffmpeg")
     await _stop_hls()
-    HLS_TMP_DIR.mkdir(parents=True, exist_ok=True)
+    # Clear stale segments from any previous session before starting
+    if HLS_TMP_DIR.exists():
+        shutil.rmtree(HLS_TMP_DIR)
+    HLS_TMP_DIR.mkdir(parents=True)
     _hls_proc = await asyncio.create_subprocess_exec(
         "ffmpeg", "-y",
         "-i", f"rtsp://{CAMERA_IP}:554/live.sdp",
         "-c:v", "copy",
         "-f", "hls",
-        "-hls_time", "2",
-        "-hls_list_size", "5",
-        "-hls_flags", "delete_segments",
+        "-hls_time", "1",
+        "-hls_list_size", "3",
+        "-hls_flags", "delete_segments+split_by_time",
         str(HLS_TMP_DIR / "live.m3u8"),
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
     )
-    # Wait for first segments to appear
+    # Wait for first segments to appear (1-second segments appear quickly)
     for _ in range(15):
         await asyncio.sleep(1)
         if (HLS_TMP_DIR / "live.m3u8").exists():

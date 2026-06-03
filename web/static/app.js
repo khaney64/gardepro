@@ -15,6 +15,7 @@ const S = {
   tab: 'gallery',
   page: 0,
   pageSize: parseInt(localStorage.getItem('pageSize') || '24', 10),
+  sortDesc: localStorage.getItem('sortDesc') !== 'false', // default newest-first
   media: [],        // full list from server
   pageItems: [],    // items on current page (for lightbox nav)
   multiSelect: false,
@@ -97,9 +98,10 @@ async function fetchMedia() {
     if (all.length >= d.total || d.items.length < size) break;
     page++;
   }
-  S.media = all;
+  S.media = S.sortDesc ? [...all].reverse() : all;
   S.page = 0;
   showProgress(false);
+  updateSortBtn();
   renderGallery();
 }
 
@@ -121,31 +123,24 @@ function updateUI() {
 
   // Connect panel vs main content
   show('connect-panel', !connected);
-  show('app-header', connected || connecting);
+  show('app-header', connected);   // header only when fully connected
   show('main-content', connected);
   show('bottom-nav', connected);
-
-  // Status dot + label
-  const dot = el('status-dot');
-  dot.className = 'status-dot ' + S.status;
-  el('status-label').textContent =
-    connected ? 'Connected' :
-    S.status === 'connecting' ? 'Connecting…' :
-    S.status === 'disconnecting' ? 'Disconnecting…' : '';
 
   // Connect button
   const btn = el('connect-btn');
   if (btn) {
+    const disconnecting = S.status === 'disconnecting';
     btn.disabled = connecting;
-    btn.textContent = connecting ? 'Connecting…' : 'Connect Camera';
+    btn.textContent = disconnecting   ? 'Disconnecting…' :
+                      connecting      ? 'Connecting…'    : 'Connect Camera';
   }
 
-  // Connect log step
+  // Connect log — show steps while connecting, clear on all other states
   const log = el('connect-log');
   if (log) {
-    if (connecting && S.step) {
+    if (S.status === 'connecting' && S.step) {
       log.classList.remove('hidden');
-      // Append new step if different from last line
       const last = log.lastElementChild;
       if (!last || last.textContent !== S.step) {
         const p = document.createElement('p');
@@ -153,7 +148,8 @@ function updateUI() {
         log.appendChild(p);
         log.scrollTop = log.scrollHeight;
       }
-    } else if (connected) {
+    } else {
+      // Clear for disconnecting, disconnected, or connected
       log.classList.add('hidden');
       log.innerHTML = '';
     }
@@ -196,6 +192,9 @@ function showProgress(visible) {
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 
 function showTab(tab) {
+  if (S.tab === 'live' && tab !== 'live' && S.hlsActive) {
+    stopHls();
+  }
   S.tab = tab;
   ['gallery', 'live', 'settings'].forEach(t => {
     el(`tab-${t}`).classList.toggle('hidden', t !== tab);
@@ -241,6 +240,7 @@ function makeThumbCard(item, idx) {
   const card = document.createElement('div');
   const key = `${item.id}:${item.kind}`;
   card.className = 'thumb-card' + (S.selected.has(key) ? ' selected' : '');
+  card.dataset.mediaKind = item.kind;
 
   const img = document.createElement('img');
   img.src = `/api/thumb/${item.id}/${item.kind}`;
@@ -252,7 +252,7 @@ function makeThumbCard(item, idx) {
   if (item.kind === 'mp4') {
     const badge = document.createElement('div');
     badge.className = 'video-badge';
-    badge.textContent = '▶';
+    badge.textContent = '▶ MP4';
     card.appendChild(badge);
   }
 
@@ -290,6 +290,20 @@ function onPageSizeChange() {
   localStorage.setItem('pageSize', S.pageSize);
   S.page = 0;
   renderGallery();
+}
+
+function toggleSort() {
+  S.sortDesc = !S.sortDesc;
+  localStorage.setItem('sortDesc', S.sortDesc);
+  S.media = [...S.media].reverse();
+  S.page = 0;
+  updateSortBtn();
+  renderGallery();
+}
+
+function updateSortBtn() {
+  const btn = el('sort-btn');
+  if (btn) btn.textContent = S.sortDesc ? '↓ Newest' : '↑ Oldest';
 }
 function scrollToTop() {
   el('main-content').scrollTop = 0;
@@ -396,8 +410,10 @@ function renderLightboxItem() {
     const video = document.createElement('video');
     video.src = `/api/file/${item.id}/${item.kind}`;
     video.controls = true;
-    video.autoplay = true;
     video.setAttribute('playsinline', '');
+    video.onerror = () => {
+      content.innerHTML = '<p class="lb-error">Could not load video.<br>The file may still be transferring.</p>';
+    };
     content.appendChild(video);
   }
 }
@@ -502,7 +518,13 @@ async function startHls() {
   const src = '/api/stream/hls/live.m3u8';
   if (typeof Hls !== 'undefined' && Hls.isSupported()) {
     if (hlsInstance) hlsInstance.destroy();
-    hlsInstance = new Hls({ lowLatencyMode: true });
+    hlsInstance = new Hls({
+      lowLatencyMode: true,
+      liveSyncDurationCount: 2,
+      liveMaxLatencyDurationCount: 4,
+      maxBufferLength: 6,
+      backBufferLength: 3,
+    });
     hlsInstance.loadSource(src);
     hlsInstance.attachMedia(video);
   } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
@@ -587,5 +609,8 @@ function show(id, visible) {
 // Set saved page size in select
 const sizeSelect = el('page-size');
 if (sizeSelect) sizeSelect.value = S.pageSize;
+
+// Set initial sort button label from saved preference
+updateSortBtn();
 
 startSSE();

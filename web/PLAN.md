@@ -53,17 +53,26 @@ Then open `http://<pi-ip>:8080` from any device on the home network.
 | BLE scan → wake pulse → hotspot detection | ✅ |
 | WiFi connect via wpa_supplicant + dhcpcd on Edimax (`wlx*`) | ✅ |
 | `wlan0` (home network) never disconnected | ✅ |
-| DHCP on Edimax, camera at `192.168.8.1` | ✅ |
-| Media enumeration (probe IDs 1…N, stop after 10 misses) | ✅ |
-| SSE broadcast for real-time status updates to browser | ✅ |
+| DHCP on Edimax, camera at `192.168.8.1`; 40 s timeout | ✅ |
+| HTTP connectivity check before enumeration (fast fail with clear error) | ✅ |
+| Media enumeration: probe `/file/{id}/JPG`, type from `Content-Type` header | ✅ |
+| SSE broadcast for real-time status updates; graceful shutdown on CTRL-C | ✅ |
 | Session keepalive (`/cmd/standby/reset` every 60 s) | ✅ |
+| `standby/now` sent on disconnect and on server shutdown (CTRL-C/SIGTERM) | ✅ |
 | WiFi signal strength poll every 10 s (`iw dev … link`) | ✅ |
 | RTSP TCP proxy on Pi port 8554 → camera port 554 | ✅ |
-| HLS streaming via ffmpeg subprocess → `/api/stream/hls/` | ✅ |
+| HLS streaming: 1-second segments, stale segment cleanup, low-latency config | ✅ |
 | Camera HTTP proxy: thumbnails, full files (streaming), delete | ✅ |
 | Settings read (`/cmd/getSetting` + `/cmd/getParaSetting`) | ✅ |
 | Format SD card (`/cmd/format/start`) | ✅ |
-| Server-restart detection (resumes if Edimax already connected) | ✅ |
+| Server-restart detection (resumes session if Edimax already connected) | ✅ |
+
+**Media type detection note:** `/thumb/{id}/JPG` and `/thumb/{id}/MP4` both return
+`HTTP 200 image/jpeg` for any valid ID — the thumbnail endpoint carries no type
+information. Type is determined by probing `/file/{id}/JPG` with `stream=True` and
+reading the `Content-Type` response header (`image/jpeg` → JPG, `video/mp4` → MP4).
+The `/JPG` vs `/MP4` suffix in the file URL does not affect which file is returned;
+the camera serves the same underlying media either way.
 
 ### Frontend (`static/`)
 
@@ -74,14 +83,17 @@ Then open `http://<pi-ip>:8080` from any device on the home network.
 | Touch targets ≥ 44 px; no hover-only interactions | ✅ |
 | Safe-area padding for notched phones | ✅ |
 | Connect panel with live step-by-step status log (SSE) | ✅ |
+| Disconnect state: log clears, button shows correct label | ✅ |
 | WiFi signal badge in header (Excellent/Good/Fair/Poor + dBm) | ✅ |
+| Gallery: newest-first default sort with toggle (persisted in localStorage) | ✅ |
 | Gallery with page size selector (12/24/48) and pagination | ✅ |
-| Video thumbnail badge (▶ overlay) | ✅ |
-| Lightbox: full JPG viewer + MP4 player (`playsinline` for iOS) | ✅ |
+| MP4 thumbnails: orange `▶ MP4` badge + border; JPG thumbnails plain | ✅ |
+| Lightbox: full JPG viewer + MP4 player (`playsinline` for iOS, no autoplay) | ✅ |
 | Swipe left/right in lightbox (phone); arrow keys (desktop) | ✅ |
 | Long-press → multi-select mode; select all; bulk delete | ✅ |
 | Live tab: RTSP URL display + copy; in-browser HLS player | ✅ |
-| HLS.js from CDN for browsers without native HLS support | ✅ |
+| HLS stops automatically when switching away from Live tab | ✅ |
+| HLS.js from CDN; low-latency config (`liveSyncDurationCount: 2`) | ✅ |
 | Settings tab: camera config table + Format SD button | ✅ |
 | Thumbnail browser caching (`Cache-Control: public, max-age=3600`) | ✅ |
 
@@ -155,4 +167,4 @@ WantedBy=multi-user.target
 | `setSetting` params | Unknown format — needs app HTTP capture |
 | LLM vision support | Confirm `qwen36-35b-a3b` accepts image inputs |
 | llama.cpp server port | Configurable — check devbox |
-| Camera media count limit | Max observed ID ~49; no server-side count API |
+| Camera media count limit | Max observed ID ~276; no server-side count API |
