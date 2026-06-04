@@ -20,6 +20,7 @@ Environment variables:
 import asyncio
 import collections
 import datetime
+from email.utils import parsedate_to_datetime
 import json
 import os
 import re
@@ -51,7 +52,7 @@ from ble_wake import (
 )
 from bleak import BleakClient
 
-from db import CacheDB, THUMB_DIR, FILES_DIR
+from db import CacheDB, THUMB_DIR, FILES_DIR, SAVED_DIR
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -87,6 +88,7 @@ _state: dict = {
     "hls_available": shutil.which("ffmpeg") is not None,
     "error":         None,
     "last_synced":   None,
+    "last_event":    None,
 }
 # Full media list kept separate (too large to include in every SSE broadcast)
 _media: list[dict] = []
@@ -102,6 +104,14 @@ _shutting_down      = False
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _parse_http_date(s: str) -> Optional[str]:
+    try:
+        dt = parsedate_to_datetime(s)
+        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        return None
+
 
 def _dbm_label(dbm: int) -> str:
     if dbm >= -55: return "Excellent"
@@ -283,10 +293,14 @@ async def _enumerate_media() -> list[dict]:
             )
             code = resp.status_code
             ct = resp.headers.get("content-type", "").lower()
+            lm = resp.headers.get("last-modified")
             resp.close()
             if code == 200:
                 kind = "mp4" if "video" in ct else "jpg"
-                results.append({"id": media_id, "kind": kind})
+                results.append({
+                    "id": media_id, "kind": kind,
+                    "captured_at": _parse_http_date(lm) if lm else None,
+                })
                 found = True
         except Exception:
             pass
@@ -305,9 +319,10 @@ async def _enumerate_media() -> list[dict]:
 
     def _sync_to_db(items):
         for item in items:
-            _db.upsert_media(item["id"], item["kind"])
+            _db.upsert_media(item["id"], item["kind"], item.get("captured_at"))
         _db.set_last_synced()
         _state["last_synced"] = _db.get_last_synced()
+        _state["last_event"]  = _db.get_last_event_time()
 
     await asyncio.to_thread(_sync_to_db, results)
     return results
@@ -437,7 +452,7 @@ async def _connection_flow():
             raise RuntimeError("WiFi connection failed — check password.")
 
         await _set_step("Waiting for DHCP…")
-        my_ip, _ = await asyncio.to_thread(linux_wait_for_ip, iface, 40)
+        my_ip, _ = await asyncio.to_thread(linux_wait_for_ip, iface, 90)
         if not my_ip:
             raise RuntimeError("DHCP timed out — camera may need more time. Try again.")
 
@@ -548,9 +563,41 @@ async def _disconnect_flow():
 
 async def _resume_session(iface: str, my_ip: str):
     """Called as a background task if Edimax is already on the camera subnet at startup."""
+    global _media
     await _log(f"Startup: resuming session on {iface} ({my_ip})")
     _state["step"] = "Reconnecting to camera…"
     await _broadcast(_broadcast_state())
+
+    async def _restore_cached(error: str = ""):
+        """Fall back to cached gallery and disconnect WiFi."""
+        all_rows = await asyncio.to_thread(_db.get_all_media)
+        _media[:] = [{"id": r["id"], "kind": r["kind"]} for r in all_rows]
+        _state.update({
+            "status": "disconnected", "step": "", "error": error or None,
+            "media_count": len(_media),
+            "last_synced": _db.get_last_synced(),
+            "last_event":  _db.get_last_event_time(),
+        })
+        try:
+            await asyncio.to_thread(linux_disconnect_wifi, iface)
+        except Exception:
+            pass
+        await _broadcast(_broadcast_state())
+
+    # Quick probe — camera may have gone to sleep since the interface still has its IP
+    try:
+        probe = await asyncio.to_thread(
+            lambda: _cam_session.get(
+                f"http://{CAMERA_IP}:{CAMERA_PORT}/cmd/getSetting", timeout=5
+            )
+        )
+        if probe.status_code >= 500:
+            raise RuntimeError(f"Camera returned HTTP {probe.status_code}")
+    except Exception as exc:
+        await _log(f"Startup: camera not reachable ({exc}) — restoring cached gallery")
+        await _restore_cached()
+        return
+
     try:
         await _enumerate_media()
         await _start_rtsp_proxy()
@@ -562,8 +609,8 @@ async def _resume_session(iface: str, my_ip: str):
         _thumb_cache_task = asyncio.create_task(_thumb_cache_loop())
         _background_tasks.append(_thumb_cache_task)
     except Exception as exc:
-        _state.update({"status": "disconnected", "step": "", "error": str(exc)})
-        await _broadcast(_broadcast_state())
+        await _log(f"Startup: session resume failed — {exc}")
+        await _restore_cached(str(exc))
 
 
 @asynccontextmanager
@@ -576,6 +623,7 @@ async def lifespan(app: FastAPI):
         _media = [{"id": r["id"], "kind": r["kind"]} for r in all_rows]
         _state["media_count"] = len(_media)
         _state["last_synced"] = _db.get_last_synced()
+        _state["last_event"]  = _db.get_last_event_time()
 
     if AUTO_CONNECT:
         asyncio.ensure_future(_auto_sync_loop())
@@ -684,6 +732,36 @@ async def api_events(request: Request):
             "Connection": "keep-alive",
         },
     )
+
+
+@app.post("/api/sync")
+async def api_sync():
+    global _connect_task
+    if _state["status"] == "connected":
+        # Re-enumerate and cache on existing connection
+        asyncio.create_task(_sync_cache())
+        return {"status": "syncing"}
+    elif _state["status"] == "disconnected":
+        # Connect, sync, then auto-disconnect (same as auto-sync but on demand)
+        async def _connect_sync_disconnect():
+            global _thumb_cache_task
+            try:
+                await _connection_flow()
+                if _state["status"] == "connected":
+                    if _thumb_cache_task and not _thumb_cache_task.done():
+                        try:
+                            await _thumb_cache_task
+                        except Exception:
+                            pass
+                    await _disconnect_flow()
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                await _log(f"Sync: exception — {exc}")
+        _connect_task = asyncio.create_task(_connect_sync_disconnect())
+        return {"status": "connecting"}
+    else:
+        raise HTTPException(409, detail=f"Status is '{_state['status']}' — cannot sync now")
 
 
 @app.post("/api/connect")
@@ -819,6 +897,97 @@ async def api_delete(media_id: int, kind: str):
         raise
     except Exception as exc:
         raise HTTPException(503, str(exc))
+
+
+@app.post("/api/save/{media_id}/{kind}")
+async def api_save(media_id: int, kind: str):
+    kind_lower = kind.lower()
+    SAVED_DIR.mkdir(parents=True, exist_ok=True)
+    saved_at = datetime.datetime.now()
+    saved_at_iso = saved_at.strftime("%Y-%m-%dT%H:%M:%S")
+    saved_at_fs  = saved_at.strftime("%Y%m%dT%H%M%S")
+
+    # ── Thumbnail ──
+    thumb_src = THUMB_DIR / f"{media_id}_{kind_lower}.jpg"
+    if not thumb_src.exists():
+        if _state["status"] != "connected":
+            raise HTTPException(503, "Thumbnail not cached — connect to camera first")
+        url = f"http://{CAMERA_IP}:{CAMERA_PORT}/thumb/{media_id}/{kind.upper()}"
+        resp = await asyncio.to_thread(lambda: _cam_session.get(url, timeout=5))
+        if resp.status_code != 200:
+            raise HTTPException(404, "Thumbnail not found on camera")
+        await asyncio.to_thread(thumb_src.write_bytes, resp.content)
+        await asyncio.to_thread(_db.mark_thumb_cached, media_id, kind_lower, str(thumb_src))
+
+    thumb_dst = SAVED_DIR / f"{saved_at_fs}_{media_id}_{kind_lower}_thumb.jpg"
+    await asyncio.to_thread(shutil.copy2, str(thumb_src), str(thumb_dst))
+
+    # ── Full file ──
+    file_src = FILES_DIR / f"{media_id}_{kind_lower}"
+    if not file_src.exists():
+        if _state["status"] != "connected":
+            raise HTTPException(
+                503,
+                "Full file not cached — open it at full resolution first, or connect to camera"
+            )
+        url = f"http://{CAMERA_IP}:{CAMERA_PORT}/file/{media_id}/{kind.upper()}"
+        resp = await asyncio.to_thread(
+            lambda: _cam_session.get(url, timeout=(2, 120))
+        )
+        if resp.status_code != 200:
+            raise HTTPException(404, "File not found on camera")
+        await asyncio.to_thread(file_src.write_bytes, resp.content)
+        await asyncio.to_thread(_db.mark_file_cached, media_id, kind_lower, str(file_src))
+
+    file_dst = SAVED_DIR / f"{saved_at_fs}_{media_id}_{kind_lower}"
+    await asyncio.to_thread(shutil.copy2, str(file_src), str(file_dst))
+
+    saved_id = await asyncio.to_thread(
+        _db.save_media, media_id, kind_lower, saved_at_iso,
+        str(thumb_dst), str(file_dst)
+    )
+    return {"saved_id": saved_id, "saved_at": saved_at_iso}
+
+
+@app.get("/api/saved")
+async def api_saved():
+    items = await asyncio.to_thread(_db.get_saved_media)
+    return {"items": items}
+
+
+@app.get("/api/saved/thumb/{saved_id}")
+async def api_saved_thumb(saved_id: int):
+    item = await asyncio.to_thread(_db.get_saved_by_id, saved_id)
+    if not item or not item["thumb_path"]:
+        raise HTTPException(404)
+    path = Path(item["thumb_path"])
+    if not path.exists():
+        raise HTTPException(404)
+    return FileResponse(str(path), media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/api/saved/file/{saved_id}")
+async def api_saved_file(saved_id: int):
+    item = await asyncio.to_thread(_db.get_saved_by_id, saved_id)
+    if not item or not item["file_path"]:
+        raise HTTPException(404)
+    path = Path(item["file_path"])
+    if not path.exists():
+        raise HTTPException(404)
+    mime = "video/mp4" if item["kind"] == "mp4" else "image/jpeg"
+    return FileResponse(str(path), media_type=mime)
+
+
+@app.delete("/api/saved/{saved_id}")
+async def api_saved_delete(saved_id: int):
+    row = await asyncio.to_thread(_db.delete_saved, saved_id)
+    if not row:
+        raise HTTPException(404)
+    for key in ("thumb_path", "file_path"):
+        if row.get(key):
+            Path(row[key]).unlink(missing_ok=True)
+    return {"success": True}
 
 
 @app.get("/api/settings")

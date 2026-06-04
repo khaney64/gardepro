@@ -11,6 +11,7 @@ const S = {
   signalLabel: null,
   error: null,
   lastSynced: null,
+  lastEvent: null,
 
   // UI
   tab: 'gallery',
@@ -22,6 +23,8 @@ const S = {
   multiSelect: false,
   selected: new Set(),
   lightboxIdx: -1,
+  lightboxSource: 'gallery', // 'gallery' | 'local'
+  localItems: [],
   modalOpen: false,
 };
 
@@ -56,6 +59,7 @@ function handleEvent(data) {
     S.hlsAvailable = data.hls_available || false;
     S.error       = data.error || null;
     S.lastSynced  = data.last_synced || null;
+    S.lastEvent   = data.last_event  || null;
     if (data.signal_dbm != null) { S.signalDbm = data.signal_dbm; S.signalLabel = data.signal_label; }
 
     if (!wasConnected && S.status === 'connected') {
@@ -180,6 +184,15 @@ function updateUI() {
   // Disconnect button only makes sense when connected
   show('disconnect-btn', connected);
   updateOfflineBar();
+  updateLastEvent();
+
+  // Sync Now button
+  const syncBtn = el('sync-btn');
+  if (syncBtn) {
+    syncBtn.disabled = connecting;
+    const lbl = syncBtn.querySelector('.sync-label');
+    if (lbl) lbl.textContent = connecting ? ' Syncing…' : ' Sync Now';
+  }
 
   // Connect button (on the initial connect-panel)
   const btn = el('connect-btn');
@@ -239,15 +252,16 @@ function showTab(tab) {
     stopHls();
   }
   S.tab = tab;
-  ['gallery', 'live', 'settings', 'logs'].forEach(t => {
+  ['gallery', 'live', 'local', 'settings', 'logs'].forEach(t => {
     el(`tab-${t}`).classList.toggle('hidden', t !== tab);
   });
   document.querySelectorAll('[data-tab]').forEach(b => {
     b.classList.toggle('active', b.dataset.tab === tab);
   });
-  if (tab === 'live') updateLiveTab();
+  if (tab === 'live')     updateLiveTab();
   if (tab === 'settings') updateSettingsTab();
-  if (tab === 'logs') fetchLogs();
+  if (tab === 'logs')     fetchLogs();
+  if (tab === 'local')    loadLocalMedia();
 }
 
 // ── Gallery ───────────────────────────────────────────────────────────────────
@@ -417,6 +431,7 @@ async function deleteSelected() {
 // ── Lightbox ──────────────────────────────────────────────────────────────────
 
 function openLightbox(idx) {
+  S.lightboxSource = 'gallery';
   S.lightboxIdx = idx;
   const lb = el('lightbox');
   lb.classList.add('open');
@@ -433,36 +448,46 @@ function openLightbox(idx) {
 }
 
 function renderLightboxItem() {
-  const item = S.pageItems[S.lightboxIdx];
+  const isLocal = S.lightboxSource === 'local';
+  const items   = isLocal ? S.localItems : S.pageItems;
+  const item    = items[S.lightboxIdx];
   if (!item) return;
 
   const content = el('lightbox-content');
-  // Stop any playing video
   const oldV = content.querySelector('video');
   if (oldV) oldV.pause();
   content.innerHTML = '';
 
-  el('lb-counter').textContent =
-    `${S.lightboxIdx + 1} / ${S.pageItems.length}`;
+  el('lb-counter').textContent = `${S.lightboxIdx + 1} / ${items.length}`;
 
-  const btn = el('lb-delete-btn');
-  btn.dataset.id   = item.id;
-  btn.dataset.kind = item.kind;
-  btn.classList.toggle('hidden', S.status !== 'connected');
+  const fileUrl  = isLocal ? `/api/saved/file/${item.saved_id}`  : `/api/file/${item.id}/${item.kind}`;
+  const thumbUrl = isLocal ? `/api/saved/thumb/${item.saved_id}` : `/api/thumb/${item.id}/${item.kind}`;
+
+  // Delete: always visible for local, connected-only for gallery
+  const delBtn = el('lb-delete-btn');
+  delBtn.dataset.savedId = item.saved_id || '';
+  delBtn.dataset.id      = isLocal ? item.cam_id : item.id;
+  delBtn.dataset.kind    = item.kind;
+  delBtn.classList.toggle('hidden', !isLocal && S.status !== 'connected');
+
+  // Save: only for gallery items
+  const saveBtn = el('lb-save-btn');
+  if (saveBtn) saveBtn.classList.toggle('hidden', isLocal);
 
   if (item.kind === 'jpg') {
     const img = document.createElement('img');
-    img.alt = `Photo ${item.id}`;
+    img.alt = isLocal ? `Saved photo` : `Photo ${item.id}`;
     img.onerror = () => {
-      // Not cached + not connected: fall back to thumbnail
       img.onerror = null;
-      img.src = `/api/thumb/${item.id}/${item.kind}`;
+      img.src = thumbUrl;
       const note = document.createElement('p');
       note.className = 'lb-offline-note';
-      note.textContent = 'Cached thumbnail — connect for full resolution';
+      note.textContent = isLocal
+        ? 'Could not load saved file'
+        : 'Cached thumbnail — connect for full resolution';
       content.appendChild(note);
     };
-    img.src = `/api/file/${item.id}/${item.kind}`;
+    img.src = fileUrl;
     content.appendChild(img);
   } else {
     const video = document.createElement('video');
@@ -471,17 +496,19 @@ function renderLightboxItem() {
     video.onerror = () => {
       content.innerHTML = '';
       const img = document.createElement('img');
-      img.src = `/api/thumb/${item.id}/${item.kind}`;
-      img.alt = `Video ${item.id}`;
+      img.src = thumbUrl;
+      img.alt = isLocal ? `Saved video` : `Video ${item.id}`;
       content.appendChild(img);
       const note = document.createElement('p');
       note.className = 'lb-offline-note';
-      note.textContent = S.status !== 'connected'
-        ? 'Connect to play video'
-        : 'Could not load video. The file may still be transferring.';
+      note.textContent = isLocal
+        ? 'Could not load saved video'
+        : (S.status !== 'connected'
+            ? 'Connect to play video'
+            : 'Could not load video. The file may still be transferring.');
       content.appendChild(note);
     };
-    video.src = `/api/file/${item.id}/${item.kind}`;
+    video.src = fileUrl;
     content.appendChild(video);
   }
 }
@@ -504,11 +531,28 @@ function lightboxPrev() {
 }
 
 function lightboxNext() {
-  if (S.lightboxIdx < S.pageItems.length - 1) { S.lightboxIdx++; renderLightboxItem(); }
+  const items = S.lightboxSource === 'local' ? S.localItems : S.pageItems;
+  if (S.lightboxIdx < items.length - 1) { S.lightboxIdx++; renderLightboxItem(); }
 }
 
 async function lightboxDelete() {
-  const btn = el('lb-delete-btn');
+  if (S.lightboxSource === 'local') {
+    const btn     = el('lb-delete-btn');
+    const savedId = parseInt(btn.dataset.savedId, 10);
+    const kind    = btn.dataset.kind;
+    if (!confirm(`Delete this saved ${kind.toUpperCase()}?`)) return;
+    const r = await fetch(`/api/saved/${savedId}`, { method: 'DELETE' });
+    if (r.ok) {
+      S.localItems = S.localItems.filter(i => i.saved_id !== savedId);
+      closeLightbox();
+      renderLocalGallery();
+    } else {
+      const d = await r.json().catch(() => ({}));
+      alert(`Delete failed: ${d.detail || r.status}`);
+    }
+    return;
+  }
+  const btn  = el('lb-delete-btn');
   const id   = parseInt(btn.dataset.id, 10);
   const kind = btn.dataset.kind;
   if (!confirm(`Delete this ${kind.toUpperCase()}?`)) return;
@@ -518,6 +562,28 @@ async function lightboxDelete() {
     closeLightbox();
     renderGallery();
   }
+}
+
+async function lightboxSave() {
+  const item = S.pageItems[S.lightboxIdx];
+  if (!item) return;
+  const btn = el('lb-save-btn');
+  btn.disabled = true;
+  btn.textContent = '…';
+  try {
+    const r = await fetch(`/api/save/${item.id}/${item.kind}`, { method: 'POST' });
+    if (r.ok) {
+      btn.textContent = '✓';
+      setTimeout(() => { btn.textContent = '💾'; btn.disabled = false; }, 1500);
+      return;
+    }
+    const d = await r.json().catch(() => ({}));
+    alert(`Save failed: ${d.detail || r.status}`);
+  } catch (e) {
+    alert(`Save failed: ${e.message}`);
+  }
+  btn.textContent = '💾';
+  btn.disabled = false;
 }
 
 // Keyboard navigation in lightbox
@@ -696,12 +762,98 @@ function updateOfflineBar() {
   }
 }
 
+function updateLastEvent() {
+  const lbl = el('last-event-label');
+  if (lbl) lbl.textContent = 'Last event: ' + formatEventAge(S.lastEvent);
+}
+
+async function syncNow() {
+  await fetch('/api/sync', { method: 'POST' });
+}
+
 function formatRelativeTime(isoStr) {
   const diff = (Date.now() - new Date(isoStr).getTime()) / 1000;
   if (diff < 60)    return 'just now';
   if (diff < 3600)  return Math.floor(diff / 60) + 'm ago';
   if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
   return Math.floor(diff / 86400) + 'd ago';
+}
+
+function formatEventAge(isoStr) {
+  if (!isoStr) return 'never';
+  const diff = (Date.now() - new Date(isoStr).getTime()) / 1000;
+  if (diff < 60)    { const s = Math.round(diff);    return s + (s === 1 ? ' second' : ' seconds'); }
+  if (diff < 3600)  { const m = Math.round(diff/60); return m + (m === 1 ? ' minute' : ' minutes'); }
+  if (diff < 86400) { const h = Math.round(diff/3600);return h + (h === 1 ? ' hour'   : ' hours');   }
+  const d = Math.round(diff / 86400);
+  return d + (d === 1 ? ' day' : ' days');
+}
+
+// ── Local tab ─────────────────────────────────────────────────────────────────
+
+async function loadLocalMedia() {
+  try {
+    const r = await fetch('/api/saved');
+    const d = await r.json();
+    S.localItems = d.items || [];
+  } catch (_) {
+    S.localItems = [];
+  }
+  renderLocalGallery();
+}
+
+function renderLocalGallery() {
+  const grid  = el('local-grid');
+  const empty = el('local-empty');
+  const count = el('local-count');
+  count.textContent = S.localItems.length ? `${S.localItems.length} saved` : '';
+  if (!S.localItems.length) {
+    grid.innerHTML = '';
+    empty.classList.remove('hidden');
+    return;
+  }
+  empty.classList.add('hidden');
+  grid.innerHTML = '';
+  S.localItems.forEach((item, idx) => grid.appendChild(makeLocalThumbCard(item, idx)));
+}
+
+function makeLocalThumbCard(item, idx) {
+  const card = document.createElement('div');
+  card.className = 'thumb-card';
+  card.dataset.mediaKind = item.kind;
+
+  const img = document.createElement('img');
+  img.src = `/api/saved/thumb/${item.saved_id}`;
+  img.loading = 'lazy';
+  img.alt = `Saved ${item.kind.toUpperCase()}`;
+  img.draggable = false;
+  card.appendChild(img);
+
+  if (item.kind === 'mp4') {
+    const badge = document.createElement('div');
+    badge.className = 'video-badge';
+    badge.textContent = '▶ MP4';
+    card.appendChild(badge);
+  }
+
+  const dateLabel = document.createElement('div');
+  dateLabel.className = 'saved-date-label';
+  dateLabel.textContent = formatSavedAt(item.saved_at);
+  card.appendChild(dateLabel);
+
+  card.addEventListener('click', () => {
+    S.lightboxSource = 'local';
+    S.lightboxIdx = idx;
+    el('lightbox').classList.add('open');
+    renderLightboxItem();
+  });
+  return card;
+}
+
+function formatSavedAt(savedAt) {
+  const d = new Date(savedAt);
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+    + ' ' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 }
 
 // ── Logs tab ──────────────────────────────────────────────────────────────────
@@ -755,7 +907,7 @@ if (sizeSelect) sizeSelect.value = S.pageSize;
 // Set initial sort button label from saved preference
 updateSortBtn();
 
-// Refresh relative timestamps every 60 s so "last synced" doesn't go stale
-setInterval(updateOfflineBar, 60000);
+// Refresh relative timestamps every 60 s so "last synced/event" doesn't go stale
+setInterval(() => { updateOfflineBar(); updateLastEvent(); }, 60000);
 
 startSSE();

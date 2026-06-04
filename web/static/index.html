@@ -18,13 +18,16 @@
       <span id="status-dot" class="status-dot"></span>
       <span id="status-label" class="status-label"></span>
       <span id="signal-badge" class="signal-badge hidden"></span>
+      <span id="last-event-label" class="last-event-label"></span>
     </div>
     <nav id="tab-nav" class="tab-nav desktop-only">
       <button class="tab-btn active" data-tab="gallery" onclick="showTab('gallery')">Gallery</button>
       <button class="tab-btn" data-tab="live" onclick="showTab('live')">Live</button>
+      <button class="tab-btn" data-tab="local" onclick="showTab('local')">Local</button>
       <button class="tab-btn" data-tab="settings" onclick="showTab('settings')">Settings</button>
       <button class="tab-btn" data-tab="logs" onclick="showTab('logs')">Logs</button>
     </nav>
+    <button id="sync-btn" class="btn btn-sm btn-sync" onclick="syncNow()" title="Sync Now">🔄<span class="sync-label"> Sync Now</span></button>
     <button id="disconnect-btn" class="btn btn-danger btn-sm" onclick="disconnectCamera()">Disconnect</button>
   </header>
 
@@ -116,6 +119,17 @@
       </div>
     </div>
 
+    <!-- Local tab -->
+    <div id="tab-local" class="tab-panel hidden">
+      <div class="gallery-toolbar">
+        <div class="toolbar-left">
+          <span id="local-count" class="media-count"></span>
+        </div>
+      </div>
+      <div id="local-grid" class="gallery-grid"></div>
+      <div id="local-empty" class="gallery-empty hidden">No saved items yet.<br>Use 💾 in the lightbox to save files locally.</div>
+    </div>
+
     <!-- Logs tab -->
     <div id="tab-logs" class="tab-panel hidden">
       <div class="logs-panel">
@@ -167,6 +181,10 @@
       <span class="nav-icon">📡</span>
       <span>Live</span>
     </button>
+    <button class="nav-item" data-tab="local" onclick="showTab('local')">
+      <span class="nav-icon">💾</span>
+      <span>Local</span>
+    </button>
     <button class="nav-item" data-tab="settings" onclick="showTab('settings')">
       <span class="nav-icon">⚙️</span>
       <span>Settings</span>
@@ -182,7 +200,10 @@
     <div class="lb-header">
       <button class="lb-btn" onclick="closeLightbox()">✕</button>
       <span id="lb-counter" class="lb-counter"></span>
-      <button id="lb-delete-btn" class="lb-btn lb-delete" onclick="lightboxDelete()">🗑</button>
+      <div class="lb-actions">
+        <button id="lb-save-btn" class="lb-btn lb-save hidden" onclick="lightboxSave()">💾</button>
+        <button id="lb-delete-btn" class="lb-btn lb-delete" onclick="lightboxDelete()">🗑</button>
+      </div>
     </div>
     <div id="lightbox-content" class="lb-content"></div>
     <button class="lb-arrow lb-prev" onclick="lightboxPrev()">‹</button>

@@ -3,6 +3,7 @@ Persistent cache for GardePro media metadata, thumbnails, and full files.
 DB:     ~/.gardepro/cache.db
 Thumbs: ~/.gardepro/thumbs/{id}_{kind}.jpg
 Files:  ~/.gardepro/files/{id}_{kind}
+Saved:  ~/.gardepro/saved/{timestamp}_{id}_{kind}[_thumb].jpg
 """
 import sqlite3
 from datetime import datetime, timezone
@@ -12,6 +13,7 @@ from typing import Optional
 CACHE_DIR = Path.home() / ".gardepro"
 THUMB_DIR = CACHE_DIR / "thumbs"
 FILES_DIR = CACHE_DIR / "files"
+SAVED_DIR = CACHE_DIR / "saved"
 DB_PATH   = CACHE_DIR / "cache.db"
 
 _DDL = """
@@ -24,7 +26,16 @@ CREATE TABLE IF NOT EXISTS media (
     file_path     TEXT,
     analyzed      INTEGER NOT NULL DEFAULT 0,
     analysis_json TEXT,
+    captured_at   TEXT,
     PRIMARY KEY (id, kind)
+);
+CREATE TABLE IF NOT EXISTS saved_media (
+    saved_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    cam_id     INTEGER NOT NULL,
+    kind       TEXT    NOT NULL,
+    saved_at   TEXT    NOT NULL,
+    thumb_path TEXT,
+    file_path  TEXT
 );
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -41,14 +52,16 @@ class CacheDB:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         THUMB_DIR.mkdir(parents=True, exist_ok=True)
         FILES_DIR.mkdir(parents=True, exist_ok=True)
+        SAVED_DIR.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(
             str(DB_PATH), check_same_thread=False, isolation_level=None
         )
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_DDL)
-        # Migrate existing DBs that predate file-caching columns
-        for col, defn in [("file_cached", "INTEGER NOT NULL DEFAULT 0"),
-                          ("file_path",   "TEXT")]:
+        # Migrate existing DBs that predate newer columns
+        for col, defn in [("file_cached",  "INTEGER NOT NULL DEFAULT 0"),
+                          ("file_path",    "TEXT"),
+                          ("captured_at",  "TEXT")]:
             try:
                 self._conn.execute(f"ALTER TABLE media ADD COLUMN {col} {defn}")
             except Exception:
@@ -65,10 +78,22 @@ class CacheDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def upsert_media(self, id: int, kind: str):
+    def upsert_media(self, id: int, kind: str, captured_at: Optional[str] = None):
+        # New rows: use camera-provided timestamp or fall back to discovery time.
+        # Existing rows: only update if camera provides a better (non-null) value.
         self._conn.execute(
-            "INSERT OR IGNORE INTO media (id, kind) VALUES (?, ?)", (id, kind)
+            """INSERT INTO media (id, kind, captured_at)
+               VALUES (?, ?, COALESCE(?, datetime('now')))
+               ON CONFLICT(id, kind) DO UPDATE SET
+                 captured_at = COALESCE(?, media.captured_at)""",
+            (id, kind, captured_at, captured_at),
         )
+
+    def get_last_event_time(self) -> Optional[str]:
+        row = self._conn.execute(
+            "SELECT MAX(captured_at) AS t FROM media"
+        ).fetchone()
+        return row["t"] if row else None
 
     def mark_thumb_cached(self, id: int, kind: str, path: str):
         self._conn.execute(
@@ -96,6 +121,42 @@ class CacheDB:
             "SELECT id, kind FROM media WHERE thumb_cached=0"
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ── Saved media ───────────────────────────────────────────────────────────
+
+    def save_media(self, cam_id: int, kind: str, saved_at: str,
+                   thumb_path: str, file_path: str) -> int:
+        cur = self._conn.execute(
+            """INSERT INTO saved_media (cam_id, kind, saved_at, thumb_path, file_path)
+               VALUES (?, ?, ?, ?, ?)""",
+            (cam_id, kind, saved_at, thumb_path, file_path),
+        )
+        return cur.lastrowid
+
+    def get_saved_media(self) -> list[dict]:
+        rows = self._conn.execute(
+            """SELECT saved_id, cam_id, kind, saved_at, thumb_path, file_path
+               FROM saved_media ORDER BY saved_at DESC"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_saved_by_id(self, saved_id: int) -> Optional[dict]:
+        row = self._conn.execute(
+            "SELECT saved_id, cam_id, kind, saved_at, thumb_path, file_path FROM saved_media WHERE saved_id=?",
+            (saved_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def delete_saved(self, saved_id: int) -> Optional[dict]:
+        row = self._conn.execute(
+            "SELECT thumb_path, file_path FROM saved_media WHERE saved_id=?", (saved_id,)
+        ).fetchone()
+        if not row:
+            return None
+        self._conn.execute("DELETE FROM saved_media WHERE saved_id=?", (saved_id,))
+        return dict(row)
+
+    # ── Meta ──────────────────────────────────────────────────────────────────
 
     def set_last_synced(self):
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

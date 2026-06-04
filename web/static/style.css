@@ -225,8 +225,17 @@ header {
   min-height: 44px; min-width: 44px;
 }
 .lb-btn:hover { background: rgba(255,255,255,.2); }
+.lb-actions { display: flex; gap: 6px; align-items: center; }
+.lb-save  { background: rgba(42,122,42,.6); }
+.lb-save:hover  { background: rgba(42,122,42,.9); }
 .lb-delete { background: rgba(192,57,43,.6); }
 .lb-delete:hover { background: rgba(192,57,43,.9); }
+.saved-date-label {
+  position: absolute; bottom: 0; left: 0; right: 0;
+  background: rgba(0,0,0,.55); color: #fff;
+  font-size: .68em; padding: 3px 5px; text-align: center;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .lb-counter { color: rgba(255,255,255,.7); font-size: .9em; }
 .lb-content {
   max-width: 95vw; max-height: 85vh;
@@ -314,6 +323,13 @@ header {
   /* Disconnect btn becomes icon on phone */
   #disconnect-btn { padding: 6px 10px; font-size: .8em; }
 
+  /* Sync btn: icon only on phone */
+  .sync-label { display: none; }
+  #sync-btn { padding: 6px 10px; }
+
+  /* Last event: smaller, allow shrink */
+  .last-event-label { font-size: .68em; max-width: 100px; }
+
   /* Toolbar wraps on small screens */
   .gallery-toolbar { gap: 6px; }
   .toolbar-center  { order: 3; width: 100%; justify-content: center; }
@@ -349,6 +365,8 @@ header {
 }
 .offline-bar .btn { margin-left: auto; min-height: 34px; padding: 6px 14px; }
 .last-synced-label { color: #bdc3c7; }
+.last-event-label  { font-size: .75em; color: #9eaab8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.btn-sync { background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.15); color: var(--header-text); }
 
 /* ── Cache progress ── */
 .cache-progress {
