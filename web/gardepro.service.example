@@ -1,0 +1,19 @@
+[Unit]
+Description=GardePro Trail Camera Web Server
+After=network-online.target bluetooth.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<user>
+WorkingDirectory=/home/<user>/gardepro/web
+EnvironmentFile=/etc/gardepro.env
+ExecStart=/usr/bin/python3 -m uvicorn server:app --host 0.0.0.0 --port 8080
+Restart=on-failure
+RestartSec=15s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gardepro
+
+[Install]
+WantedBy=multi-user.target

@@ -17,20 +17,41 @@ FastAPI server  (web/server.py)
 Connection Manager  (imports from ../ble_wake.py)
     ↕  BLE (hci0)     ↕  HTTP proxy (wlx* → 192.168.8.1:8080)
 Camera (GardePro E6P)
+
+Cache (web/db.py → ~/.gardepro/)
+    cache.db      — SQLite: media index, sync metadata
+    thumbs/       — cached thumbnail JPEGs (320×180, ~20 KB each)
+    files/        — cached full files (tee-written on first view)
 ```
 
 **Stack:**
 - Backend: Python 3.12 + FastAPI + uvicorn (apt packages)
+- Cache: stdlib `sqlite3` + local filesystem
 - Frontend: Vanilla HTML/JS/CSS — no build step, works on any browser
 - Streaming: asyncio TCP proxy for RTSP; ffmpeg → HLS for in-browser video
 - Installed: `sudo apt-get install -y python3-fastapi python3-uvicorn ffmpeg`
 
-**Run:**
+**Run (manual):**
 ```bash
 cd /home/<user>/gardepro/web
 GARDEPRO_WIFI_PASSWORD=<password> python3 -m uvicorn server:app --host 0.0.0.0 --port 8080
 ```
 Then open `http://<pi-ip>:8080` from any device on the home network.
+
+**Run (systemd):**
+```bash
+sudo systemctl status gardepro      # check status
+journalctl -u gardepro -f           # follow logs
+sudo systemctl restart gardepro     # restart after code changes
+```
+Credentials live in `/etc/gardepro.env` (chmod 600, not in git).
+
+**First-time systemd setup:**
+```bash
+sed 's/<user>/YOUR_USERNAME/g' web/gardepro.service.example \
+  | sudo tee /etc/systemd/system/gardepro.service
+sudo systemctl daemon-reload && sudo systemctl enable --now gardepro
+```
 
 **Environment variables:**
 
@@ -41,6 +62,8 @@ Then open `http://<pi-ip>:8080` from any device on the home network.
 | `GARDEPRO_BLE_ADAPTER` | `hci0` | Bluetooth HCI adapter |
 | `GARDEPRO_WIFI_IFACE` | first `wlx*` | WiFi interface for camera hotspot |
 | `GARDEPRO_RTSP_PORT` | `8554` | Local port for RTSP TCP proxy |
+| `GARDEPRO_AUTO_CONNECT` | `0` | Set to `1` to enable periodic background sync |
+| `GARDEPRO_SYNC_INTERVAL` | `600` | Seconds between auto-sync attempts |
 
 ---
 
@@ -138,8 +161,8 @@ only write commands are gated.
 
 During monitor mode capture, the camera MAC (`0c:cf:89:7e:e9:c3`) was observed
 sending 802.11 Probe Requests for `HaneyNet` — suggesting the camera has a
-dual-mode capability (AP hotspot + STA client to home WiFi). This may be relevant
-for Phase 3 (auto-connect without BLE wake if camera joins home network directly).
+dual-mode capability (AP hotspot + STA client to home WiFi). If confirmed, this
+could enable auto-sync without BLE wake if the camera joins home network directly.
 
 ### Path to unblock
 
@@ -153,32 +176,62 @@ To implement write commands, one of:
 
 ---
 
-## Phase 3 — Media Cache + Auto-Connect (planned)
+## Phase 3 — Media Cache + Auto-Connect ✅ Complete
 
-- SQLite database (`~/.gardepro/cache.db`): id, kind, thumb_cached, file_path,
-  analyzed, analysis_json
-- Download and store thumbnails locally after enumeration
-- Serve cached thumbnails without camera connection
-- On connect: fetch only new IDs not already in cache
-- Auto-connect mode (`--auto-connect` flag or systemd timer)
-- Web UI shows "Last synced: 2h ago" when operating from cache
-- Systemd service for automatic startup at boot:
+### Cache layer (`web/db.py`)
 
-```ini
-[Unit]
-Description=GardePro Camera Server
-After=network-online.target
+SQLite DB at `~/.gardepro/cache.db` with two tables:
 
-[Service]
-User=<user>
-WorkingDirectory=/home/<user>/gardepro/web
-Environment=GARDEPRO_WIFI_PASSWORD=<password>
-ExecStart=/usr/bin/python3 -m uvicorn server:app --host 0.0.0.0 --port 8080
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
+```sql
+media (id, kind, thumb_cached, thumb_path, file_cached, file_path,
+       analyzed, analysis_json)
+meta  (key, value)   -- stores last_synced timestamp
 ```
+
+Files on disk:
+- `~/.gardepro/thumbs/{id}_{kind}.jpg` — thumbnail JPEGs (320×180 native)
+- `~/.gardepro/files/{id}_{kind}` — full-resolution files (tee-cached on first view)
+
+### Backend (`server.py`)
+
+| Feature | Status |
+|---|---|
+| DB opens at startup; cached media loaded immediately (offline-first) | ✅ |
+| Thumbnail download after each connect (`_thumb_cache_loop`) | ✅ |
+| Thumbnails served from `~/.gardepro/thumbs/` first; camera proxy as fallback | ✅ |
+| Full files tee-cached to `~/.gardepro/files/` on first view | ✅ |
+| Full files served from local cache (works offline); 404 if neither cached nor connected | ✅ |
+| `_enumerate_media` upserts all items to DB and writes `last_synced` timestamp | ✅ |
+| On disconnect: `_media` repopulated from DB (gallery persists offline) | ✅ |
+| Delete removes DB row + both thumbnail and full file from disk | ✅ |
+| `GARDEPRO_AUTO_CONNECT=1` enables periodic background sync loop | ✅ |
+| Auto-sync: if disconnected → connect → enumerate → cache → disconnect | ✅ |
+| Auto-sync: if already connected → re-enumerate + cache only (no disconnect) | ✅ |
+| `GARDEPRO_SYNC_INTERVAL` configures sync interval (default 600 s) | ✅ |
+| Systemd unit template (`web/gardepro.service.example`); fill `<user>` and install to `/etc/systemd/system/` | ✅ |
+
+### Frontend
+
+| Feature | Status |
+|---|---|
+| Gallery and nav visible when disconnected if cache has media | ✅ |
+| Offline bar (sticky, orange) shows "Last synced: Xm ago" + Connect button | ✅ |
+| Offline bar Connect button shows state: disabled + "Connecting…" during auto-sync | ✅ |
+| Cache-progress bar counts thumbnail downloads in gallery panel | ✅ |
+| Lightbox always requests `/api/file/`; falls back to thumbnail on 404 | ✅ |
+| Lightbox shows full-res from local cache when offline (previously viewed files) | ✅ |
+| Lightbox offline fallback: cached thumbnail + "connect for full resolution" note | ✅ |
+| MP4 offline: thumbnail + "Connect to play video" note | ✅ |
+| Delete button hidden in lightbox when disconnected | ✅ |
+| Settings tab shows "Connect to the camera to view settings." when offline | ✅ |
+| Gallery grid: 2 cols mobile / 4 tablet / 6 desktop (max 6 on any width) | ✅ |
+
+### Thumbnail details
+
+Camera-native thumbnail size: **320×180 px** (16:9), ~20 KB JPG, ~11 KB for MP4 frames.
+Gallery cards use a 4:3 aspect ratio with `object-fit: cover` (slight top/bottom crop).
+At 6 columns on a 1440 px screen, thumbnails render at 240 px — below native, so no
+upscaling. At 1920 px, each column is 320 px — exactly native resolution.
 
 ---
 
@@ -209,4 +262,5 @@ WantedBy=multi-user.target
 | `setSetting` params | Unknown format — needs app HTTP capture |
 | LLM vision support | Confirm `qwen36-35b-a3b` accepts image inputs |
 | llama.cpp server port | Configurable — check devbox |
-| Camera media count limit | Max observed ID ~276; no server-side count API |
+| Camera media count limit | Max observed ID ~437; no server-side count API |
+| Camera dual-mode STA/AP | Probe requests for home WiFi seen — unconfirmed if joinable |

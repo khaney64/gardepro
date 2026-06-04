@@ -8,6 +8,7 @@ __pycache__/
 .agents/
 .codex/
 private-notes.md
+web/gardepro.service
 
 
 # Raw captures, logs, dumps, and generated analysis outputs

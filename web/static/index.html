@@ -27,7 +27,14 @@
     <button id="disconnect-btn" class="btn btn-danger btn-sm" onclick="disconnectCamera()">Disconnect</button>
   </header>
 
-  <!-- ── Connect panel (shown when disconnected) ── -->
+  <!-- ── Offline bar (shown when disconnected but viewing cached gallery) ── -->
+  <div id="offline-bar" class="offline-bar hidden">
+    <span>Offline — cached gallery</span>
+    <span id="last-synced-label" class="last-synced-label"></span>
+    <button class="btn btn-sm btn-primary" onclick="connectCamera()">Connect</button>
+  </div>
+
+  <!-- ── Connect panel (shown when disconnected with no cache) ── -->
   <div id="connect-panel">
     <div class="connect-card">
       <div class="camera-icon">📷</div>
@@ -71,6 +78,9 @@
       <div id="gallery-progress" class="gallery-progress hidden">
         <span id="gallery-progress-text">Scanning media…</span>
       </div>
+      <div id="cache-progress" class="cache-progress hidden">
+        <span id="cache-progress-text"></span>
+      </div>
 
       <div id="gallery-grid" class="gallery-grid"></div>
       <div id="gallery-empty" class="gallery-empty hidden">No media found on camera.</div>
@@ -107,7 +117,10 @@
 
     <!-- Settings tab -->
     <div id="tab-settings" class="tab-panel hidden">
-      <div class="settings-panel">
+      <div id="settings-disconnected" class="live-disconnected hidden">
+        <p>Connect to the camera to view settings.</p>
+      </div>
+      <div id="settings-content" class="settings-panel">
         <div class="settings-section">
           <h3>Camera Settings</h3>
           <div id="settings-loading" class="settings-loading">
@@ -126,6 +139,7 @@
           </div>
         </div>
       </div>
+    </div>
     </div>
 
   </main>

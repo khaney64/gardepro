@@ -10,6 +10,7 @@ const S = {
   signalDbm: null,
   signalLabel: null,
   error: null,
+  lastSynced: null,
 
   // UI
   tab: 'gallery',
@@ -42,15 +43,20 @@ function startSSE() {
 function handleEvent(data) {
   if (data.type === 'state') {
     const wasConnected = S.status === 'connected';
+    const wasDisconnected = S.status === 'disconnected';
     S.status      = data.status;
     S.step        = data.step || '';
     S.mediaCount  = data.media_count || 0;
     S.rtspUrl     = data.rtsp_url || null;
     S.hlsAvailable = data.hls_available || false;
     S.error       = data.error || null;
+    S.lastSynced  = data.last_synced || null;
     if (data.signal_dbm != null) { S.signalDbm = data.signal_dbm; S.signalLabel = data.signal_label; }
 
     if (!wasConnected && S.status === 'connected') {
+      fetchMedia();
+    } else if (wasDisconnected && S.status === 'disconnected' && S.mediaCount > 0 && S.media.length === 0) {
+      // Server restarted with cached media — load gallery immediately
       fetchMedia();
     }
     updateUI();
@@ -65,6 +71,14 @@ function handleEvent(data) {
     el('gallery-progress-text').textContent = `Scanning media… ${data.count} found`;
     el('media-count').textContent = `${data.count} items`;
 
+  } else if (data.type === 'cache_progress') {
+    if (data.cached < data.total) {
+      el('cache-progress-text').textContent = `Caching thumbnails… ${data.cached} / ${data.total}`;
+      show('cache-progress', true);
+    } else {
+      show('cache-progress', false);
+    }
+
   } else if (data.type === 'media_deleted') {
     S.media = S.media.filter(m => !(m.id === data.id && m.kind === data.kind));
     renderGallery();
@@ -74,6 +88,7 @@ function handleEvent(data) {
 // ── API calls ─────────────────────────────────────────────────────────────────
 
 async function connectCamera() {
+  if (S.status !== 'disconnected') return;
   el('connect-error').classList.add('hidden');
   el('connect-btn').disabled = true;
   el('connect-btn').textContent = 'Connecting…';
@@ -120,12 +135,17 @@ async function deleteFile(id, kind) {
 function updateUI() {
   const connected = S.status === 'connected';
   const connecting = S.status === 'connecting' || S.status === 'disconnecting';
+  const hasCached = S.mediaCount > 0;
+  const showApp = connected || hasCached;
 
-  // Connect panel vs main content
-  show('connect-panel', !connected);
-  show('app-header', connected);   // header only when fully connected
-  show('main-content', connected);
-  show('bottom-nav', connected);
+  // Show app (gallery, header, nav) when connected OR when cache has media
+  show('connect-panel', !showApp);
+  show('app-header', showApp);
+  show('main-content', showApp);
+  show('bottom-nav', showApp);
+  // Disconnect button only makes sense when connected
+  show('disconnect-btn', connected);
+  updateOfflineBar();
 
   // Connect button
   const btn = el('connect-btn');
@@ -165,6 +185,7 @@ function updateUI() {
 
   updateSignalBadge();
   updateLiveTab();
+  updateSettingsTab();
 }
 
 function updateSignalBadge() {
@@ -203,6 +224,7 @@ function showTab(tab) {
     b.classList.toggle('active', b.dataset.tab === tab);
   });
   if (tab === 'live') updateLiveTab();
+  if (tab === 'settings') updateSettingsTab();
 }
 
 // ── Gallery ───────────────────────────────────────────────────────────────────
@@ -225,6 +247,9 @@ function renderGallery() {
 
   if (!total) {
     grid.innerHTML = '';
+    empty.textContent = S.status === 'connected'
+      ? 'No media found on camera.'
+      : 'No cached media. Connect to camera to sync.';
     empty.classList.remove('hidden');
     return;
   }
@@ -400,20 +425,40 @@ function renderLightboxItem() {
   const btn = el('lb-delete-btn');
   btn.dataset.id   = item.id;
   btn.dataset.kind = item.kind;
+  btn.classList.toggle('hidden', S.status !== 'connected');
 
   if (item.kind === 'jpg') {
     const img = document.createElement('img');
-    img.src = `/api/file/${item.id}/${item.kind}`;
     img.alt = `Photo ${item.id}`;
+    img.onerror = () => {
+      // Not cached + not connected: fall back to thumbnail
+      img.onerror = null;
+      img.src = `/api/thumb/${item.id}/${item.kind}`;
+      const note = document.createElement('p');
+      note.className = 'lb-offline-note';
+      note.textContent = 'Cached thumbnail — connect for full resolution';
+      content.appendChild(note);
+    };
+    img.src = `/api/file/${item.id}/${item.kind}`;
     content.appendChild(img);
   } else {
     const video = document.createElement('video');
-    video.src = `/api/file/${item.id}/${item.kind}`;
     video.controls = true;
     video.setAttribute('playsinline', '');
     video.onerror = () => {
-      content.innerHTML = '<p class="lb-error">Could not load video.<br>The file may still be transferring.</p>';
+      content.innerHTML = '';
+      const img = document.createElement('img');
+      img.src = `/api/thumb/${item.id}/${item.kind}`;
+      img.alt = `Video ${item.id}`;
+      content.appendChild(img);
+      const note = document.createElement('p');
+      note.className = 'lb-offline-note';
+      note.textContent = S.status !== 'connected'
+        ? 'Connect to play video'
+        : 'Could not load video. The file may still be transferring.';
+      content.appendChild(note);
     };
+    video.src = `/api/file/${item.id}/${item.kind}`;
     content.appendChild(video);
   }
 }
@@ -459,6 +504,14 @@ document.addEventListener('keydown', e => {
   if (e.key === 'ArrowRight') lightboxNext();
   if (e.key === 'Escape')     closeLightbox();
 });
+
+// ── Settings tab ──────────────────────────────────────────────────────────────
+
+function updateSettingsTab() {
+  const connected = S.status === 'connected';
+  show('settings-disconnected', !connected);
+  show('settings-content', connected);
+}
 
 // ── Live streaming ─────────────────────────────────────────────────────────────
 
@@ -594,6 +647,33 @@ async function formatSD() {
   } else {
     alert(`Format failed: ${d.desc || d.detail || r.status}`);
   }
+}
+
+// ── Offline bar ───────────────────────────────────────────────────────────────
+
+function updateOfflineBar() {
+  const offline = S.status !== 'connected' && S.mediaCount > 0;
+  show('offline-bar', offline);
+  if (!offline) return;
+  if (S.lastSynced) {
+    el('last-synced-label').textContent = 'Last synced: ' + formatRelativeTime(S.lastSynced);
+  }
+  const btn = el('offline-bar').querySelector('.btn');
+  if (btn) {
+    const busy = S.status === 'connecting' || S.status === 'disconnecting';
+    btn.disabled = busy;
+    btn.textContent = S.status === 'disconnecting' ? 'Disconnecting…'
+                    : S.status === 'connecting'    ? 'Connecting…'
+                    : 'Connect';
+  }
+}
+
+function formatRelativeTime(isoStr) {
+  const diff = (Date.now() - new Date(isoStr).getTime()) / 1000;
+  if (diff < 60)    return 'just now';
+  if (diff < 3600)  return Math.floor(diff / 60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+  return Math.floor(diff / 86400) + 'd ago';
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

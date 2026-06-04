@@ -32,22 +32,37 @@ with `gardepro-e6p-investigation.md`.
 
 A self-hosted web app (`web/`) runs on the Raspberry Pi and replaces the vendor
 mobile app for browsing media, deleting files, live streaming, and reading camera
-settings.
+settings. A local SQLite cache keeps the gallery available offline between syncs.
 
-**Run:**
+**Run (systemd):**
+```bash
+sudo systemctl status gardepro      # check status
+journalctl -u gardepro -f           # follow logs
+sudo systemctl restart gardepro     # pick up code changes
+```
+Credentials are in `/etc/gardepro.env`. Open `http://<pi-ip>:8080` from any device on the home network.
+
+**Run (manual):**
 ```bash
 cd web
 GARDEPRO_WIFI_PASSWORD=<password> python3 -m uvicorn server:app --host 0.0.0.0 --port 8080
 ```
-Then open `http://<pi-ip>:8080` from any device on the home network.
 
 **Files:**
-- `web/server.py` — FastAPI backend: BLE wake, WiFi connect, media proxy, HLS streaming
+- `web/server.py` — FastAPI backend: BLE wake, WiFi connect, media proxy, HLS streaming, auto-sync
+- `web/db.py` — SQLite cache layer: media index, thumbnail tracking, full-file tracking
 - `web/static/` — Vanilla HTML/JS/CSS frontend (no build step)
+- `web/gardepro.service.example` — Systemd unit template (copy, fill `<user>`, install to `/etc/systemd/system/`)
 - `web/PLAN.md` — Full architecture, phase status, and open questions
 
 **Dependencies:** `sudo apt-get install -y python3-fastapi python3-uvicorn ffmpeg`
 
-Phase 1 (core gallery, live view, settings read) is complete. Phase 2 (settings
-write, time sync) is blocked pending BLE Level 1–3 auth implementation. See
-`web/PLAN.md` for details.
+**Local cache** (on Pi): `~/.gardepro/cache.db`, `~/.gardepro/thumbs/`, `~/.gardepro/files/`
+
+**Phase status:**
+- Phase 1 (core gallery, live view, settings read) — ✅ complete
+- Phase 2 (settings write, time sync) — ⏸ blocked on BLE Level 1–3 auth
+- Phase 3 (SQLite cache, offline gallery, auto-sync, systemd) — ✅ complete
+- Phase 4 (LLM image analysis, alerting) — 📋 planned
+
+See `web/PLAN.md` for full details.

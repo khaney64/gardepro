@@ -13,6 +13,8 @@ Environment variables:
   GARDEPRO_BLE_ADAPTER     Bluetooth HCI adapter (default: hci0)
   GARDEPRO_WIFI_IFACE      WiFi interface for camera (default: first wlx* found)
   GARDEPRO_RTSP_PORT       Local port for RTSP TCP proxy (default: 8554)
+  GARDEPRO_AUTO_CONNECT    Set to 1 to enable periodic background sync
+  GARDEPRO_SYNC_INTERVAL   Seconds between auto-sync attempts (default: 600)
 """
 
 import asyncio
@@ -47,21 +49,27 @@ from ble_wake import (
 )
 from bleak import BleakClient
 
+from db import CacheDB, THUMB_DIR, FILES_DIR
+
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-CAMERA_BLE_ADDRESS = os.environ.get("GARDEPRO_BLE_ADDRESS") or None
-BLE_ADAPTER        = os.environ.get("GARDEPRO_BLE_ADAPTER", "hci0")
+CAMERA_BLE_ADDRESS  = os.environ.get("GARDEPRO_BLE_ADDRESS") or None
+BLE_ADAPTER         = os.environ.get("GARDEPRO_BLE_ADAPTER", "hci0")
 WIFI_IFACE_OVERRIDE = os.environ.get("GARDEPRO_WIFI_IFACE") or None
-CAMERA_IP          = "192.168.8.1"
-CAMERA_PORT        = 8080
-RTSP_PORT_LOCAL    = int(os.environ.get("GARDEPRO_RTSP_PORT", "8554"))
-HLS_TMP_DIR        = Path("/tmp/gardepro_hls")
-STATIC_DIR         = Path(__file__).parent / "static"
+CAMERA_IP           = "192.168.8.1"
+CAMERA_PORT         = 8080
+RTSP_PORT_LOCAL     = int(os.environ.get("GARDEPRO_RTSP_PORT", "8554"))
+HLS_TMP_DIR         = Path("/tmp/gardepro_hls")
+STATIC_DIR          = Path(__file__).parent / "static"
+AUTO_CONNECT        = os.environ.get("GARDEPRO_AUTO_CONNECT", "").strip() in ("1", "true", "yes")
+SYNC_INTERVAL       = int(os.environ.get("GARDEPRO_SYNC_INTERVAL", "600"))
 
 # ── Shared camera session ─────────────────────────────────────────────────────
 
 _cam_session = requests.Session()
 _cam_session.trust_env = False
+
+_db = CacheDB()
 
 # ── Global state ──────────────────────────────────────────────────────────────
 
@@ -76,6 +84,7 @@ _state: dict = {
     "rtsp_url":      None,
     "hls_available": shutil.which("ffmpeg") is not None,
     "error":         None,
+    "last_synced":   None,
 }
 # Full media list kept separate (too large to include in every SSE broadcast)
 _media: list[dict] = []
@@ -83,6 +92,7 @@ _media: list[dict] = []
 _sse_queues:        list[asyncio.Queue] = []
 _connect_task:      Optional[asyncio.Task] = None
 _background_tasks:  list[asyncio.Task] = []
+_thumb_cache_task:  Optional[asyncio.Task] = None
 _rtsp_server       = None
 _hls_proc          = None
 _shutting_down      = False
@@ -275,7 +285,81 @@ async def _enumerate_media() -> list[dict]:
 
     _media = results
     _state["media_count"] = len(results)
+
+    def _sync_to_db(items):
+        for item in items:
+            _db.upsert_media(item["id"], item["kind"])
+        _db.set_last_synced()
+        _state["last_synced"] = _db.get_last_synced()
+
+    await asyncio.to_thread(_sync_to_db, results)
     return results
+
+
+# ── Background tasks (cache) ───────────────────────────────────────────────────
+
+async def _thumb_cache_loop():
+    """Download uncached thumbnails to ~/.gardepro/thumbs/ in the background."""
+    pending = await asyncio.to_thread(_db.get_uncached_thumbs)
+    total = len(pending)
+    if not total:
+        return
+
+    await _broadcast({"type": "cache_progress", "cached": 0, "total": total})
+    for i, item in enumerate(pending):
+        if _state["status"] != "connected":
+            break
+        id_, kind = item["id"], item["kind"]
+        url = f"http://{CAMERA_IP}:{CAMERA_PORT}/thumb/{id_}/{kind.upper()}"
+        dest = THUMB_DIR / f"{id_}_{kind}.jpg"
+        try:
+            resp = await asyncio.to_thread(
+                lambda u=url: _cam_session.get(u, timeout=5)
+            )
+            if resp.status_code == 200:
+                await asyncio.to_thread(dest.write_bytes, resp.content)
+                await asyncio.to_thread(_db.mark_thumb_cached, id_, kind, str(dest))
+        except Exception:
+            pass
+        if (i + 1) % 10 == 0 or i + 1 == total:
+            await _broadcast({"type": "cache_progress",
+                              "cached": i + 1, "total": total})
+
+
+async def _sync_cache():
+    """Re-enumerate and cache new thumbnails on an existing connection."""
+    await _enumerate_media()
+    await _thumb_cache_loop()
+
+
+async def _auto_sync_loop():
+    """
+    Periodic background sync.
+    - If disconnected: connect → wait for thumbnail caching → disconnect.
+    - If already connected (manual session): enumerate + cache only, no disconnect.
+    Live stream requires a manual connection; auto-sync does not keep a persistent session.
+    """
+    await asyncio.sleep(10)  # let uvicorn fully start
+    while not _shutting_down:
+        await asyncio.sleep(SYNC_INTERVAL)
+        if _shutting_down:
+            break
+        if _state["status"] == "connected":
+            # Piggyback on manual session: re-enumerate and cache any new thumbs
+            await _sync_cache()
+        elif _state["status"] == "disconnected":
+            # Auto-sync: connect (which starts thumb caching), wait, then disconnect
+            try:
+                await _connection_flow()
+                if _state["status"] == "connected":
+                    if _thumb_cache_task and not _thumb_cache_task.done():
+                        try:
+                            await _thumb_cache_task
+                        except Exception:
+                            pass
+                    await _disconnect_flow()
+            except Exception:
+                pass  # _connection_flow resets state on failure
 
 
 # ── Connection flow ───────────────────────────────────────────────────────────
@@ -365,12 +449,20 @@ async def _connection_flow():
         await _start_rtsp_proxy()
         await _broadcast(_broadcast_state())
 
+        global _thumb_cache_task
         _background_tasks.clear()
         _background_tasks.append(asyncio.create_task(_keepalive_loop()))
         _background_tasks.append(asyncio.create_task(_signal_poll_loop(iface)))
+        _thumb_cache_task = asyncio.create_task(_thumb_cache_loop())
+        _background_tasks.append(_thumb_cache_task)
 
     except asyncio.CancelledError:
-        _state.update({"status": "disconnected", "step": "", "error": "Cancelled"})
+        all_rows = await asyncio.to_thread(_db.get_all_media)
+        _media[:] = [{"id": r["id"], "kind": r["kind"]} for r in all_rows]
+        _state.update({
+            "status": "disconnected", "step": "", "error": "Cancelled",
+            "media_count": len(_media), "last_synced": _db.get_last_synced(),
+        })
         try:
             await asyncio.to_thread(linux_disconnect_wifi, iface)
         except Exception:
@@ -379,9 +471,12 @@ async def _connection_flow():
         raise
 
     except Exception as exc:
-        _state.update({"status": "disconnected", "step": "", "error": str(exc)})
-        _media = []
-        _state["media_count"] = 0
+        all_rows = await asyncio.to_thread(_db.get_all_media)
+        _media[:] = [{"id": r["id"], "kind": r["kind"]} for r in all_rows]
+        _state.update({
+            "status": "disconnected", "step": "", "error": str(exc),
+            "media_count": len(_media), "last_synced": _db.get_last_synced(),
+        })
         try:
             await asyncio.to_thread(linux_disconnect_wifi, iface)
         except Exception:
@@ -415,11 +510,13 @@ async def _disconnect_flow():
 
     await asyncio.to_thread(linux_disconnect_wifi, iface)
 
-    _media = []
+    all_rows = await asyncio.to_thread(_db.get_all_media)
+    _media[:] = [{"id": r["id"], "kind": r["kind"]} for r in all_rows]
     _state.update({
         "status": "disconnected", "step": "", "camera_ip": None,
         "my_ip": None, "signal_dbm": None, "signal_label": None,
-        "media_count": 0, "rtsp_url": None, "error": None,
+        "media_count": len(_media), "rtsp_url": None, "error": None,
+        "last_synced": _db.get_last_synced(),
     })
     await _broadcast(_broadcast_state())
 
@@ -436,8 +533,11 @@ async def _resume_session(iface: str, my_ip: str):
         await _start_rtsp_proxy()
         _state.update({"status": "connected", "step": ""})
         await _broadcast(_broadcast_state())
+        global _thumb_cache_task
         _background_tasks.append(asyncio.create_task(_keepalive_loop()))
         _background_tasks.append(asyncio.create_task(_signal_poll_loop(iface)))
+        _thumb_cache_task = asyncio.create_task(_thumb_cache_loop())
+        _background_tasks.append(_thumb_cache_task)
     except Exception as exc:
         _state.update({"status": "disconnected", "step": "", "error": str(exc)})
         await _broadcast(_broadcast_state())
@@ -445,6 +545,18 @@ async def _resume_session(iface: str, my_ip: str):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _media
+    # Open cache DB and restore media list for offline gallery
+    _db.open()
+    all_rows = await asyncio.to_thread(_db.get_all_media)
+    if all_rows:
+        _media = [{"id": r["id"], "kind": r["kind"]} for r in all_rows]
+        _state["media_count"] = len(_media)
+        _state["last_synced"] = _db.get_last_synced()
+
+    if AUTO_CONNECT:
+        asyncio.ensure_future(_auto_sync_loop())
+
     # Detect if already connected (e.g. server restarted while camera was up)
     iface = linux_get_wifi_interface(WIFI_IFACE_OVERRIDE)
     try:
@@ -494,6 +606,8 @@ async def lifespan(app: FastAPI):
             await asyncio.to_thread(linux_disconnect_wifi, iface)
         except Exception:
             pass
+
+    _db.close()
 
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
@@ -582,8 +696,15 @@ async def api_media(page: int = 0, size: int = 24):
 
 @app.get("/api/thumb/{media_id}/{kind}")
 async def api_thumb(media_id: int, kind: str):
+    # Serve from local cache first (works offline)
+    cached = THUMB_DIR / f"{media_id}_{kind.lower()}.jpg"
+    if cached.exists():
+        return FileResponse(
+            str(cached), media_type="image/jpeg",
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
     if _state["status"] != "connected":
-        raise HTTPException(503, "Not connected")
+        raise HTTPException(503, "Not connected and no cached thumbnail")
     url = f"http://{CAMERA_IP}:{CAMERA_PORT}/thumb/{media_id}/{kind.upper()}"
     try:
         resp = await asyncio.to_thread(lambda: _cam_session.get(url, timeout=3))
@@ -602,12 +723,22 @@ async def api_thumb(media_id: int, kind: str):
 
 @app.get("/api/file/{media_id}/{kind}")
 async def api_file(media_id: int, kind: str):
-    if _state["status"] != "connected":
-        raise HTTPException(503, "Not connected")
-    url = f"http://{CAMERA_IP}:{CAMERA_PORT}/file/{media_id}/{kind.upper()}"
     kind_lower = kind.lower()
     mime = "video/mp4" if kind_lower == "mp4" else "image/jpeg"
+    cached = FILES_DIR / f"{media_id}_{kind_lower}"
 
+    # Serve from local cache (works offline)
+    if cached.exists():
+        return FileResponse(
+            str(cached), media_type=mime,
+            headers={"Cache-Control": "public, max-age=86400",
+                     "Content-Disposition": f'inline; filename="cam_{media_id}.{kind_lower}"'},
+        )
+
+    if _state["status"] != "connected":
+        raise HTTPException(404, "File not cached and camera not connected")
+
+    url = f"http://{CAMERA_IP}:{CAMERA_PORT}/file/{media_id}/{kind.upper()}"
     resp = await asyncio.to_thread(
         lambda: _cam_session.get(url, stream=True, timeout=(2, 120))
     )
@@ -615,20 +746,27 @@ async def api_file(media_id: int, kind: str):
         raise HTTPException(resp.status_code)
 
     it = resp.iter_content(chunk_size=65536)
+    tmp = FILES_DIR / f".{media_id}_{kind_lower}.tmp"
 
     async def body():
-        while True:
-            chunk = await asyncio.to_thread(lambda: next(it, None))
-            if chunk is None:
-                break
-            yield chunk
+        buf = bytearray()
+        try:
+            while True:
+                chunk = await asyncio.to_thread(lambda: next(it, None))
+                if chunk is None:
+                    break
+                buf.extend(chunk)
+                yield bytes(chunk)
+            # Full file received — persist to disk
+            await asyncio.to_thread(tmp.write_bytes, bytes(buf))
+            await asyncio.to_thread(tmp.rename, cached)
+            await asyncio.to_thread(_db.mark_file_cached, media_id, kind_lower, str(cached))
+        except Exception:
+            await asyncio.to_thread(lambda: tmp.unlink(missing_ok=True))
 
     return StreamingResponse(
-        body(),
-        media_type=mime,
-        headers={
-            "Content-Disposition": f'inline; filename="cam_{media_id}.{kind_lower}"',
-        },
+        body(), media_type=mime,
+        headers={"Content-Disposition": f'inline; filename="cam_{media_id}.{kind_lower}"'},
     )
 
 
@@ -644,6 +782,7 @@ async def api_delete(media_id: int, kind: str):
             _media[:] = [m for m in _media
                          if not (m["id"] == media_id and m["kind"] == kind.lower())]
             _state["media_count"] = len(_media)
+            await asyncio.to_thread(_db.delete_media, media_id, kind.lower())
             await _broadcast({**_broadcast_state(), "type": "media_deleted",
                               "id": media_id, "kind": kind.lower()})
             return {"success": True}
