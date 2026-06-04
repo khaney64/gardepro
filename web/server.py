@@ -18,6 +18,8 @@ Environment variables:
 """
 
 import asyncio
+import collections
+import datetime
 import json
 import os
 import re
@@ -90,6 +92,7 @@ _state: dict = {
 _media: list[dict] = []
 
 _sse_queues:        list[asyncio.Queue] = []
+_log_entries:       collections.deque = collections.deque(maxlen=200)
 _connect_task:      Optional[asyncio.Task] = None
 _background_tasks:  list[asyncio.Task] = []
 _thumb_cache_task:  Optional[asyncio.Task] = None
@@ -137,9 +140,23 @@ async def _broadcast(data: dict):
             pass
 
 
+def _log_sync(msg: str) -> dict:
+    ts = datetime.datetime.now().strftime("%H:%M:%S")
+    entry = {"ts": ts, "msg": msg}
+    _log_entries.append(entry)
+    print(f"[{ts}] {msg}", flush=True)
+    return entry
+
+
+async def _log(msg: str):
+    entry = _log_sync(msg)
+    await _broadcast({"type": "log", **entry})
+
+
 async def _set_step(step: str):
     _state["step"] = step
     _state["error"] = None
+    await _log(step)
     await _broadcast(_broadcast_state())
 
 
@@ -184,7 +201,7 @@ async def _start_rtsp_proxy():
         _state["rtsp_url"] = f"rtsp://{_get_pi_ip()}:{RTSP_PORT_LOCAL}/live.sdp"
     except Exception as exc:
         _state["rtsp_url"] = None
-        print(f"[rtsp proxy] failed to start on port {RTSP_PORT_LOCAL}: {exc}")
+        _log_sync(f"RTSP proxy failed on port {RTSP_PORT_LOCAL}: {exc}")
 
 
 async def _stop_rtsp_proxy():
@@ -345,10 +362,11 @@ async def _auto_sync_loop():
         if _shutting_down:
             break
         if _state["status"] == "connected":
-            # Piggyback on manual session: re-enumerate and cache any new thumbs
+            await _log("Auto-sync: re-enumerating on active session…")
             await _sync_cache()
+            await _log("Auto-sync: done")
         elif _state["status"] == "disconnected":
-            # Auto-sync: connect (which starts thumb caching), wait, then disconnect
+            await _log("Auto-sync: starting background connection…")
             try:
                 await _connection_flow()
                 if _state["status"] == "connected":
@@ -358,8 +376,11 @@ async def _auto_sync_loop():
                         except Exception:
                             pass
                     await _disconnect_flow()
-            except Exception:
-                pass  # _connection_flow resets state on failure
+                    await _log("Auto-sync: completed successfully")
+                else:
+                    await _log("Auto-sync: connection failed (see error above)")
+            except Exception as exc:
+                await _log(f"Auto-sync: exception — {exc}")
 
 
 # ── Connection flow ───────────────────────────────────────────────────────────
@@ -457,6 +478,7 @@ async def _connection_flow():
         _background_tasks.append(_thumb_cache_task)
 
     except asyncio.CancelledError:
+        await _log("Connection cancelled")
         all_rows = await asyncio.to_thread(_db.get_all_media)
         _media[:] = [{"id": r["id"], "kind": r["kind"]} for r in all_rows]
         _state.update({
@@ -471,6 +493,7 @@ async def _connection_flow():
         raise
 
     except Exception as exc:
+        await _log(f"Connection failed: {exc}")
         all_rows = await asyncio.to_thread(_db.get_all_media)
         _media[:] = [{"id": r["id"], "kind": r["kind"]} for r in all_rows]
         _state.update({
@@ -525,7 +548,7 @@ async def _disconnect_flow():
 
 async def _resume_session(iface: str, my_ip: str):
     """Called as a background task if Edimax is already on the camera subnet at startup."""
-    print(f"[startup] resuming session on {iface} ({my_ip})")
+    await _log(f"Startup: resuming session on {iface} ({my_ip})")
     _state["step"] = "Reconnecting to camera…"
     await _broadcast(_broadcast_state())
     try:
@@ -618,6 +641,11 @@ app = FastAPI(lifespan=lifespan)
 @app.get("/api/status")
 async def api_status():
     return {**_state, "media_count": len(_media)}
+
+
+@app.get("/api/logs")
+async def api_logs():
+    return {"entries": list(_log_entries)}
 
 
 @app.get("/api/events")

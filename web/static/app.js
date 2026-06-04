@@ -22,6 +22,7 @@ const S = {
   multiSelect: false,
   selected: new Set(),
   lightboxIdx: -1,
+  modalOpen: false,
 };
 
 let evtSource = null;
@@ -41,7 +42,11 @@ function startSSE() {
 }
 
 function handleEvent(data) {
-  if (data.type === 'state') {
+  if (data.type === 'log') {
+    appendLog(data);
+    appendConnectModalLog(data.msg);
+
+  } else if (data.type === 'state') {
     const wasConnected = S.status === 'connected';
     const wasDisconnected = S.status === 'disconnected';
     S.status      = data.status;
@@ -90,10 +95,39 @@ function handleEvent(data) {
 async function connectCamera() {
   if (S.status !== 'disconnected') return;
   el('connect-error').classList.add('hidden');
-  el('connect-btn').disabled = true;
-  el('connect-btn').textContent = 'Connecting…';
-  showConnectLog(true);
+  openConnectModal();
   await fetch('/api/connect', { method: 'POST' });
+}
+
+function openConnectModal() {
+  S.modalOpen = true;
+  el('connect-modal-log').innerHTML = '';
+  el('connect-modal-error').classList.add('hidden');
+  el('connect-modal-title').textContent = 'Connecting to Camera…';
+  show('connect-modal-cancel', true);
+  show('connect-modal-close', false);
+  el('connect-modal-x').style.display = 'none';
+  el('connect-modal').classList.remove('hidden');
+}
+
+function closeConnectModal() {
+  S.modalOpen = false;
+  el('connect-modal').classList.add('hidden');
+}
+
+async function cancelConnectModal() {
+  show('connect-modal-cancel', false);
+  await fetch('/api/disconnect', { method: 'POST' });
+}
+
+function appendConnectModalLog(msg) {
+  if (!S.modalOpen) return;
+  const log = el('connect-modal-log');
+  const p = document.createElement('p');
+  p.className = 'cml-step';
+  p.textContent = msg;
+  log.appendChild(p);
+  log.scrollTop = log.scrollHeight;
 }
 
 async function disconnectCamera() {
@@ -147,40 +181,28 @@ function updateUI() {
   show('disconnect-btn', connected);
   updateOfflineBar();
 
-  // Connect button
+  // Connect button (on the initial connect-panel)
   const btn = el('connect-btn');
   if (btn) {
-    const disconnecting = S.status === 'disconnecting';
     btn.disabled = connecting;
-    btn.textContent = disconnecting   ? 'Disconnecting…' :
-                      connecting      ? 'Connecting…'    : 'Connect Camera';
+    btn.textContent = connecting ? 'Connecting…' : 'Connect Camera';
   }
 
-  // Connect log — show steps while connecting, clear on all other states
-  const log = el('connect-log');
-  if (log) {
-    if (S.status === 'connecting' && S.step) {
-      log.classList.remove('hidden');
-      const last = log.lastElementChild;
-      if (!last || last.textContent !== S.step) {
-        const p = document.createElement('p');
-        p.textContent = S.step;
-        log.appendChild(p);
-        log.scrollTop = log.scrollHeight;
-      }
-    } else {
-      // Clear for disconnecting, disconnected, or connected
-      log.classList.add('hidden');
-      log.innerHTML = '';
+  // Connection modal state machine
+  if (S.modalOpen) {
+    if (connected) {
+      // Successfully connected — close modal
+      closeConnectModal();
+    } else if (S.error && !connecting) {
+      // Connection failed — show error, switch to close mode
+      el('connect-modal-title').textContent = 'Connection Failed';
+      const errEl = el('connect-modal-error');
+      errEl.textContent = S.error;
+      errEl.classList.remove('hidden');
+      show('connect-modal-cancel', false);
+      show('connect-modal-close', true);
+      el('connect-modal-x').style.display = '';
     }
-  }
-
-  // Error banner
-  const errBanner = el('connect-error');
-  if (S.error && !connected) {
-    errBanner.textContent = S.error;
-    errBanner.classList.remove('hidden');
-    if (btn) { btn.disabled = false; btn.textContent = 'Try Again'; }
   }
 
   updateSignalBadge();
@@ -217,7 +239,7 @@ function showTab(tab) {
     stopHls();
   }
   S.tab = tab;
-  ['gallery', 'live', 'settings'].forEach(t => {
+  ['gallery', 'live', 'settings', 'logs'].forEach(t => {
     el(`tab-${t}`).classList.toggle('hidden', t !== tab);
   });
   document.querySelectorAll('[data-tab]').forEach(b => {
@@ -225,6 +247,7 @@ function showTab(tab) {
   });
   if (tab === 'live') updateLiveTab();
   if (tab === 'settings') updateSettingsTab();
+  if (tab === 'logs') fetchLogs();
 }
 
 // ── Gallery ───────────────────────────────────────────────────────────────────
@@ -655,8 +678,13 @@ function updateOfflineBar() {
   const offline = S.status !== 'connected' && S.mediaCount > 0;
   show('offline-bar', offline);
   if (!offline) return;
+  const label = el('last-synced-label');
   if (S.lastSynced) {
-    el('last-synced-label').textContent = 'Last synced: ' + formatRelativeTime(S.lastSynced);
+    const diffMin = (Date.now() - new Date(S.lastSynced).getTime()) / 60000;
+    const stale = diffMin > 12;
+    label.textContent = 'Last synced: ' + formatRelativeTime(S.lastSynced)
+      + (stale ? ' ⚠' : '');
+    label.classList.toggle('stale', stale);
   }
   const btn = el('offline-bar').querySelector('.btn');
   if (btn) {
@@ -676,6 +704,40 @@ function formatRelativeTime(isoStr) {
   return Math.floor(diff / 86400) + 'd ago';
 }
 
+// ── Logs tab ──────────────────────────────────────────────────────────────────
+
+function appendLog(entry) {
+  const output = el('logs-output');
+  if (!output) return;
+  const line = document.createElement('div');
+  line.className = 'log-line';
+  const ts = document.createElement('span');
+  ts.className = 'log-ts';
+  ts.textContent = entry.ts;
+  const msg = document.createElement('span');
+  msg.className = 'log-msg';
+  msg.textContent = entry.msg;
+  line.appendChild(ts);
+  line.appendChild(msg);
+  output.appendChild(line);
+  // Trim to 300 lines
+  while (output.children.length > 300) output.removeChild(output.firstChild);
+  const autoScroll = el('logs-autoscroll');
+  if (autoScroll && autoScroll.checked) output.scrollTop = output.scrollHeight;
+}
+
+async function fetchLogs() {
+  try {
+    const r = await fetch('/api/logs');
+    const d = await r.json();
+    const output = el('logs-output');
+    if (!output) return;
+    output.innerHTML = '';
+    (d.entries || []).forEach(appendLog);
+    output.scrollTop = output.scrollHeight;
+  } catch (_) {}
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function el(id) { return document.getElementById(id); }
@@ -692,5 +754,8 @@ if (sizeSelect) sizeSelect.value = S.pageSize;
 
 // Set initial sort button label from saved preference
 updateSortBtn();
+
+// Refresh relative timestamps every 60 s so "last synced" doesn't go stale
+setInterval(updateOfflineBar, 60000);
 
 startSSE();

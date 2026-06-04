@@ -11,6 +11,7 @@ EnvironmentFile=/etc/gardepro.env
 ExecStart=/usr/bin/python3 -m uvicorn server:app --host 0.0.0.0 --port 8080
 Restart=on-failure
 RestartSec=15s
+TimeoutStopSec=10
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=gardepro

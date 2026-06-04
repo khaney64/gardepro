@@ -48,21 +48,34 @@ cd web
 GARDEPRO_WIFI_PASSWORD=<password> python3 -m uvicorn server:app --host 0.0.0.0 --port 8080
 ```
 
+**Features:**
+- Gallery with pagination, sort, multi-select delete, full-resolution lightbox
+- Live RTSP proxy + HLS in-browser streaming (requires ffmpeg)
+- Camera settings read; SD card format
+- Connection progress modal — shows each BLE/WiFi step in real-time, stays open on failure with error detail and Cancel/Close controls
+- Logs tab — terminal-style view of recent server logs (last 200 entries), updated live via SSE; useful for diagnosing auto-sync failures
+- Offline gallery — cached thumbnails/media remain browsable when disconnected; "Last synced" timestamp warns (⚠ orange) if stale beyond the 10-minute sync interval
+- Auto-sync — background BLE wake + WiFi connect + thumbnail cache every 10 minutes (`GARDEPRO_AUTO_CONNECT=1`)
+
 **Files:**
-- `web/server.py` — FastAPI backend: BLE wake, WiFi connect, media proxy, HLS streaming, auto-sync
+- `web/server.py` — FastAPI backend: BLE wake, WiFi connect, media proxy, HLS streaming, auto-sync, in-memory log buffer
 - `web/db.py` — SQLite cache layer: media index, thumbnail tracking, full-file tracking
 - `web/static/` — Vanilla HTML/JS/CSS frontend (no build step)
-- `web/gardepro.service.example` — Systemd unit template (copy, fill `<user>`, install to `/etc/systemd/system/`)
 - `web/PLAN.md` — Full architecture, phase status, and open questions
 
 **Dependencies:** `sudo apt-get install -y python3-fastapi python3-uvicorn ffmpeg`
 
 **Local cache** (on Pi): `~/.gardepro/cache.db`, `~/.gardepro/thumbs/`, `~/.gardepro/files/`
 
+**Systemd notes:**
+- `TimeoutStopSec=10` is set in the unit to prevent hanging stops (SSE connections delay graceful uvicorn shutdown)
+- Force-kill if stuck: `sudo systemctl kill -s KILL gardepro`
+
 **Phase status:**
 - Phase 1 (core gallery, live view, settings read) — ✅ complete
 - Phase 2 (settings write, time sync) — ⏸ blocked on BLE Level 1–3 auth
 - Phase 3 (SQLite cache, offline gallery, auto-sync, systemd) — ✅ complete
+- Phase 3.5 (connection dialog, logs tab, stale-sync warning) — ✅ complete
 - Phase 4 (LLM image analysis, alerting) — 📋 planned
 
 See `web/PLAN.md` for full details.

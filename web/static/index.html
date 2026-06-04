@@ -23,6 +23,7 @@
       <button class="tab-btn active" data-tab="gallery" onclick="showTab('gallery')">Gallery</button>
       <button class="tab-btn" data-tab="live" onclick="showTab('live')">Live</button>
       <button class="tab-btn" data-tab="settings" onclick="showTab('settings')">Settings</button>
+      <button class="tab-btn" data-tab="logs" onclick="showTab('logs')">Logs</button>
     </nav>
     <button id="disconnect-btn" class="btn btn-danger btn-sm" onclick="disconnectCamera()">Disconnect</button>
   </header>
@@ -115,6 +116,18 @@
       </div>
     </div>
 
+    <!-- Logs tab -->
+    <div id="tab-logs" class="tab-panel hidden">
+      <div class="logs-panel">
+        <div class="logs-toolbar">
+          <span class="muted">Server logs</span>
+          <button class="btn btn-sm" onclick="fetchLogs()">Refresh</button>
+          <label><input type="checkbox" id="logs-autoscroll" checked> Auto-scroll</label>
+        </div>
+        <div id="logs-output" class="logs-output"></div>
+      </div>
+    </div>
+
     <!-- Settings tab -->
     <div id="tab-settings" class="tab-panel hidden">
       <div id="settings-disconnected" class="live-disconnected hidden">
@@ -158,6 +171,10 @@
       <span class="nav-icon">⚙️</span>
       <span>Settings</span>
     </button>
+    <button class="nav-item" data-tab="logs" onclick="showTab('logs')">
+      <span class="nav-icon">📋</span>
+      <span>Logs</span>
+    </button>
   </nav>
 
   <!-- ── Lightbox ── -->
@@ -170,6 +187,22 @@
     <div id="lightbox-content" class="lb-content"></div>
     <button class="lb-arrow lb-prev" onclick="lightboxPrev()">‹</button>
     <button class="lb-arrow lb-next" onclick="lightboxNext()">›</button>
+  </div>
+
+  <!-- ── Connection progress modal ── -->
+  <div id="connect-modal" class="connect-modal hidden">
+    <div class="connect-modal-card">
+      <div class="connect-modal-header">
+        <h2 id="connect-modal-title">Connecting to Camera…</h2>
+        <button class="lb-btn" id="connect-modal-x" onclick="closeConnectModal()" style="display:none">✕</button>
+      </div>
+      <div id="connect-modal-log" class="connect-modal-log"></div>
+      <div id="connect-modal-error" class="error-banner hidden" style="margin:0 16px 12px"></div>
+      <div class="connect-modal-footer">
+        <button id="connect-modal-cancel" class="btn btn-sm btn-danger" onclick="cancelConnectModal()">Cancel</button>
+        <button id="connect-modal-close" class="btn btn-sm hidden" onclick="closeConnectModal()">Close</button>
+      </div>
+    </div>
   </div>
 
   <!-- HLS.js from CDN (loaded only when needed) -->
