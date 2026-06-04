@@ -114,6 +114,12 @@ _analysis_config:   dict = {}
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _enabled_alert_rules() -> list[dict]:
+    """Filter _alert_rules to only those enabled in _analysis_config."""
+    enabled_map = _analysis_config.get("alert_rules_enabled") or {}
+    return [r for r in _alert_rules if enabled_map.get(r.get("name"), True)]
+
+
 def _parse_http_date(s: str) -> Optional[str]:
     try:
         dt = parsedate_to_datetime(s)
@@ -403,8 +409,10 @@ async def _analysis_loop():
             engine   = result.get('engine', '')
             await _log(f"Analysis: [{kind.upper()} {id_}] {subj_str} | {snippet}" + (f" [{engine}]" if engine else ""))
         if _alert_rules and subjects and _analysis_config.get("alerts_enabled", False):
+            rules = _enabled_alert_rules()
+            cooldown = float(_analysis_config.get("alert_cooldown_minutes", 30)) * 60
             triggered = await asyncio.to_thread(
-                alerter.check_and_alert, result, id_, kind, _alert_rules, pi_host
+                alerter.check_and_alert, result, id_, kind, rules, pi_host, cooldown
             )
             if triggered:
                 await _log(f"Analysis: alert triggered — {', '.join(triggered)} (media {id_}/{kind})")
@@ -882,15 +890,18 @@ async def api_analysis():
 
 @app.get("/api/analysis/config")
 async def api_analysis_config_get():
+    alert_email = os.environ.get("GARDEPRO_ALERT_EMAIL", "").strip()
     return {
         **_analysis_config,
         "anthropic_key_set": bool(os.environ.get("ANTHROPIC_API_KEY")),
+        "alert_email": alert_email,
+        "alert_rules": [r.get("name") for r in _alert_rules],
     }
 
 
 @app.post("/api/analysis/config")
 async def api_analysis_config_set(body: dict):
-    allowed = {
+    scalar_fields = {
         "analyze_enabled": bool,
         "alerts_enabled": bool,
         "backend": str,
@@ -900,17 +911,29 @@ async def api_analysis_config_set(body: dict):
         "prompt": str,
         "max_tokens": int,
         "temperature": float,
+        "alert_cooldown_minutes": int,
     }
     update = {}
-    for key, typ in allowed.items():
+    for key, typ in scalar_fields.items():
         if key in body:
             try:
                 update[key] = typ(body[key])
             except (ValueError, TypeError):
                 raise HTTPException(400, f"Invalid value for {key!r}")
+    if "alert_rules_enabled" in body:
+        val = body["alert_rules_enabled"]
+        if not isinstance(val, dict):
+            raise HTTPException(400, "alert_rules_enabled must be an object")
+        update["alert_rules_enabled"] = {str(k): bool(v) for k, v in val.items()}
     saved = await asyncio.to_thread(analyzer.save_config, update)
     _analysis_config.update(saved)
-    return {**_analysis_config, "anthropic_key_set": bool(os.environ.get("ANTHROPIC_API_KEY"))}
+    alert_email = os.environ.get("GARDEPRO_ALERT_EMAIL", "").strip()
+    return {
+        **_analysis_config,
+        "anthropic_key_set": bool(os.environ.get("ANTHROPIC_API_KEY")),
+        "alert_email": alert_email,
+        "alert_rules": [r.get("name") for r in _alert_rules],
+    }
 
 
 @app.post("/api/analysis/run/saved/{saved_id}")
@@ -963,8 +986,10 @@ async def api_analysis_run(media_id: int, kind: str):
         await _log(f"Analysis: [{kind_lower.upper()} {media_id}] {subj_str} | {snippet}" + (f" [{engine}]" if engine else ""))
     if _alert_rules and subjects and _analysis_config.get("alerts_enabled", False):
         pi_host = f"{_get_pi_ip()}:8080"
+        rules = _enabled_alert_rules()
+        cooldown = float(_analysis_config.get("alert_cooldown_minutes", 30)) * 60
         triggered = await asyncio.to_thread(
-            alerter.check_and_alert, result, media_id, kind_lower, _alert_rules, pi_host
+            alerter.check_and_alert, result, media_id, kind_lower, rules, pi_host, cooldown
         )
         if triggered:
             await _log(f"Analysis: alert triggered — {', '.join(triggered)} (media {media_id}/{kind_lower})")

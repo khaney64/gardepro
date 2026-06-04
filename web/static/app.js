@@ -773,6 +773,36 @@ async function loadAnalysisConfig() {
     el('analysis-temperature').value = temp;
     el('analysis-temp-val').textContent = temp.toFixed(2);
     toggleAnalysisBackend();
+
+    // Email status
+    const emailEl = el('alert-email-status');
+    if (d.alert_email) {
+      emailEl.textContent = `✓ ${d.alert_email}`;
+      emailEl.style.color = 'var(--green, #22c55e)';
+    } else {
+      emailEl.textContent = 'Not configured — set GARDEPRO_ALERT_EMAIL in /etc/gardepro.env';
+      emailEl.style.color = '';
+    }
+
+    // Cooldown
+    el('alert-cooldown-minutes').value = d.alert_cooldown_minutes ?? 30;
+
+    // Per-rule toggles
+    const rulesEnabled = d.alert_rules_enabled || {};
+    const rules = d.alert_rules || [];
+    const container = el('alert-rule-toggles');
+    if (rules.length) {
+      container.innerHTML = rules.map(name => {
+        const checked = (name in rulesEnabled) ? rulesEnabled[name] : true;
+        const label = name.charAt(0).toUpperCase() + name.slice(1);
+        return `<div class="form-row">
+          <label>${label} alerts</label>
+          <label class="toggle"><input type="checkbox" id="alert-rule-${name}"${checked ? ' checked' : ''}><span class="toggle-slider"></span></label>
+        </div>`;
+      }).join('');
+    } else {
+      container.innerHTML = '<div class="form-row"><span class="muted hint">No rules — configure in ~/.gardepro/alerts.yaml</span></div>';
+    }
   } catch (_) {}
 }
 
@@ -782,20 +812,32 @@ function toggleAnalysisBackend() {
   show('analysis-anthropic-fields', !isLlm);
 }
 
+function _setConfigStatus(msg) {
+  ['analysis-save-status', 'alerts-save-status'].forEach(id => {
+    const el_ = document.getElementById(id);
+    if (el_) el_.textContent = msg;
+  });
+}
+
 async function saveAnalysisConfig() {
-  const status = el('analysis-save-status');
-  status.textContent = 'Saving…';
+  _setConfigStatus('Saving…');
   try {
+    const alertRulesEnabled = {};
+    document.querySelectorAll('[id^="alert-rule-"]').forEach(cb => {
+      alertRulesEnabled[cb.id.replace('alert-rule-', '')] = cb.checked;
+    });
     const body = {
-      analyze_enabled:   el('analysis-enabled').checked,
-      alerts_enabled:    el('alerts-enabled').checked,
-      backend:           el('analysis-backend').value,
-      llm_url:           el('analysis-llm-url').value.trim(),
-      llm_model:         el('analysis-llm-model').value.trim(),
-      anthropic_model:   el('analysis-anthropic-model').value.trim(),
-      prompt:            el('analysis-prompt').value,
-      max_tokens:        parseInt(el('analysis-max-tokens').value, 10),
-      temperature:       parseFloat(el('analysis-temperature').value),
+      analyze_enabled:        el('analysis-enabled').checked,
+      alerts_enabled:         el('alerts-enabled').checked,
+      backend:                el('analysis-backend').value,
+      llm_url:                el('analysis-llm-url').value.trim(),
+      llm_model:              el('analysis-llm-model').value.trim(),
+      anthropic_model:        el('analysis-anthropic-model').value.trim(),
+      prompt:                 el('analysis-prompt').value,
+      max_tokens:             parseInt(el('analysis-max-tokens').value, 10),
+      temperature:            parseFloat(el('analysis-temperature').value),
+      alert_cooldown_minutes: parseInt(el('alert-cooldown-minutes').value, 10) || 0,
+      alert_rules_enabled:    alertRulesEnabled,
     };
     const r = await fetch('/api/analysis/config', {
       method: 'POST',
@@ -804,13 +846,13 @@ async function saveAnalysisConfig() {
     });
     if (!r.ok) {
       const d = await r.json().catch(() => ({}));
-      status.textContent = 'Error: ' + (d.detail || r.status);
+      _setConfigStatus('Error: ' + (d.detail || r.status));
       return;
     }
-    status.textContent = '✓ Saved';
-    setTimeout(() => { status.textContent = ''; }, 2500);
+    _setConfigStatus('✓ Saved');
+    setTimeout(() => { _setConfigStatus(''); }, 2500);
   } catch (e) {
-    status.textContent = 'Error: ' + e.message;
+    _setConfigStatus('Error: ' + e.message);
   }
 }
 

@@ -145,56 +145,80 @@
     <!-- Settings tab -->
     <div id="tab-settings" class="tab-panel hidden">
 
-      <!-- Analysis settings — always accessible (no camera connection needed) -->
+      <!-- Analysis + Alert settings — always accessible (no camera connection needed) -->
       <div class="settings-panel" style="padding-bottom:0">
-      <div class="settings-section">
-        <h3>Analysis Settings</h3>
-        <div class="settings-form">
-          <div class="form-row">
-            <label>Analyze images</label>
-            <label class="toggle"><input type="checkbox" id="analysis-enabled"><span class="toggle-slider"></span></label>
-          </div>
-          <div class="form-row">
-            <label>Send alerts</label>
-            <label class="toggle"><input type="checkbox" id="alerts-enabled"><span class="toggle-slider"></span></label>
-            <span class="hint" style="margin-left:8px">Configure in ~/.gardepro/alerts.yaml</span>
-          </div>
-          <div class="form-row">
-            <label>Backend</label>
-            <select id="analysis-backend" onchange="toggleAnalysisBackend()">
-              <option value="llm">Local LLM (llama.cpp)</option>
-              <option value="anthropic">Anthropic Claude</option>
-            </select>
-          </div>
-          <div id="analysis-llm-fields">
-            <div class="form-row"><label>LLM URL</label><input id="analysis-llm-url" type="text" placeholder="http://devbox.lan:8080"></div>
-            <div class="form-row"><label>Model</label><input id="analysis-llm-model" type="text" placeholder="model name"></div>
-          </div>
-          <div id="analysis-anthropic-fields" class="hidden">
-            <div class="form-row"><label>Model</label><input id="analysis-anthropic-model" type="text"></div>
-            <div class="form-row"><label>API Key</label><span id="analysis-key-status" class="muted"></span></div>
-          </div>
-          <div class="form-row form-row-top">
-            <label>Prompt</label>
-            <textarea id="analysis-prompt" rows="3"></textarea>
-          </div>
-          <div class="form-row">
-            <label>Max Tokens</label>
-            <input id="analysis-max-tokens" type="number" min="100" max="4096" style="width:90px">
-          </div>
-          <div class="form-row">
-            <label>Temperature&nbsp;<span id="analysis-temp-val" class="muted">0.1</span></label>
-            <input id="analysis-temperature" type="range" min="0" max="1" step="0.05"
-                   oninput="el('analysis-temp-val').textContent = parseFloat(this.value).toFixed(2)" style="flex:1">
-          </div>
-          <div class="form-row form-actions">
-            <span id="analysis-save-status" class="muted"></span>
-            <button class="btn btn-primary btn-sm" onclick="saveAnalysisConfig()">Save</button>
+
+        <!-- Analysis -->
+        <div class="settings-section">
+          <h3>Analysis Settings</h3>
+          <div class="settings-form">
+            <div class="form-row">
+              <label>Analyze images</label>
+              <label class="toggle"><input type="checkbox" id="analysis-enabled"><span class="toggle-slider"></span></label>
+            </div>
+            <div class="form-row">
+              <label>Backend</label>
+              <select id="analysis-backend" onchange="toggleAnalysisBackend()">
+                <option value="llm">Local LLM (llama.cpp)</option>
+                <option value="anthropic">Anthropic Claude</option>
+              </select>
+            </div>
+            <div id="analysis-llm-fields">
+              <div class="form-row"><label>LLM URL</label><input id="analysis-llm-url" type="text" placeholder="http://devbox.lan:8080"></div>
+              <div class="form-row"><label>Model</label><input id="analysis-llm-model" type="text" placeholder="model name"></div>
+            </div>
+            <div id="analysis-anthropic-fields" class="hidden">
+              <div class="form-row"><label>Model</label><input id="analysis-anthropic-model" type="text"></div>
+              <div class="form-row"><label>API Key</label><span id="analysis-key-status" class="muted"></span></div>
+            </div>
+            <div class="form-row form-row-top">
+              <label>Prompt</label>
+              <textarea id="analysis-prompt" rows="3"></textarea>
+            </div>
+            <div class="form-row">
+              <label>Max Tokens</label>
+              <input id="analysis-max-tokens" type="number" min="100" max="4096" style="width:90px">
+            </div>
+            <div class="form-row">
+              <label>Temperature&nbsp;<span id="analysis-temp-val" class="muted">0.1</span></label>
+              <input id="analysis-temperature" type="range" min="0" max="1" step="0.05"
+                     oninput="el('analysis-temp-val').textContent = parseFloat(this.value).toFixed(2)" style="flex:1">
+            </div>
+            <div class="form-row form-actions">
+              <span id="analysis-save-status" class="muted"></span>
+              <button class="btn btn-primary btn-sm" onclick="saveAnalysisConfig()">Save</button>
+            </div>
           </div>
         </div>
-      </div>
 
-      </div><!-- /.settings-panel (analysis) -->
+        <!-- Alerts -->
+        <div class="settings-section">
+          <h3>Alert Settings</h3>
+          <div class="settings-form">
+            <div class="form-row">
+              <label>Send alerts</label>
+              <label class="toggle"><input type="checkbox" id="alerts-enabled"><span class="toggle-slider"></span></label>
+            </div>
+            <div class="form-row">
+              <label>Email</label>
+              <span id="alert-email-status" class="muted"></span>
+            </div>
+            <div class="form-row">
+              <label>Cooldown</label>
+              <div style="display:flex;align-items:center;gap:6px">
+                <input id="alert-cooldown-minutes" type="number" min="0" max="1440" style="width:70px" value="30">
+                <span class="muted">min between alerts per rule</span>
+              </div>
+            </div>
+            <div id="alert-rule-toggles"></div>
+            <div class="form-row form-actions">
+              <span id="alerts-save-status" class="muted"></span>
+              <button class="btn btn-primary btn-sm" onclick="saveAnalysisConfig()">Save</button>
+            </div>
+          </div>
+        </div>
+
+      </div><!-- /.settings-panel (analysis + alerts) -->
 
       <!-- Camera settings — connection-gated -->
       <div id="settings-disconnected" class="live-disconnected hidden">

@@ -59,6 +59,8 @@ GARDEPRO_WIFI_PASSWORD=<password> python3 -m uvicorn server:app --host 0.0.0.0 -
 - Last Event indicator — header shows how long ago the newest media item was discovered; updates every 60 seconds
 - Offline gallery — cached thumbnails/media remain browsable when disconnected; "Last synced" warns (⚠ orange) if stale beyond 10 minutes
 - Auto-sync — background BLE wake + WiFi connect + thumbnail cache every 10 minutes (`GARDEPRO_AUTO_CONNECT=1`)
+- LLM image analysis — thumbnails sent to local llama.cpp or Anthropic Claude for animal/person detection; results shown as subject badges and colored borders on thumbnails, description in lightbox
+- Alert rules — keyword-based rules in `~/.gardepro/alerts.yaml`; actions: log or email (Gmail SMTP); per-rule enable/disable and cooldown configurable from the Settings UI
 
 **Files:**
 - `web/server.py` — FastAPI backend: BLE wake, WiFi connect, media proxy, HLS streaming, auto-sync, in-memory log buffer, saved-media endpoints
@@ -80,6 +82,7 @@ GARDEPRO_WIFI_PASSWORD=<password> python3 -m uvicorn server:app --host 0.0.0.0 -
 - Phase 2 (settings write, time sync) — ⏸ blocked on BLE Level 1–3 auth
 - Phase 3 (SQLite cache, offline gallery, auto-sync, systemd) — ✅ complete
 - Phase 3.5 (connection dialog, logs tab, stale-sync warning, last-event, sync-now, local save tab) — ✅ complete
-- Phase 4 (LLM image analysis, alerting) — 📋 planned
+- Phase 4 (LLM image analysis, alert rules, email alerts, per-rule UI controls) — ✅ complete
+- Phase 5 (webhook alerts, animal sighting analytics, alert rule UI editing) — 📋 planned
 
 See `web/PLAN.md` for full details.

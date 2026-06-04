@@ -235,22 +235,90 @@ upscaling. At 1920 px, each column is 320 px — exactly native resolution.
 
 ---
 
-## Phase 4 — LLM Image Analysis + Alerting (planned)
+## Phase 4 — LLM Image Analysis + Alerting ✅ Complete
 
-- **devbox** at `<devbox-ip>` — llama.cpp server with `qwen36-35b-a3b`
-- llama.cpp OpenAI-compatible API: `http://<devbox-ip>:<port>/v1/chat/completions`
-- **Prerequisite:** confirm whether model supports vision (image inputs).
-  Qwen2.5-VL supports it; Qwen2.5-Instruct does not.
-  Check: `curl http://<devbox-ip>:<port>/v1/models`
-- Background analysis queue: after caching a new image, base64-encode and send
-  to llama.cpp with a prompt describing animal/person detection
-- Store result JSON in `cache.db`; show analysis text on thumbnail hover
-- Alert rules in `~/.gardepro/alerts.yaml`:
-  - Match keywords in analysis text (raccoon, cat, unknown animal, person, etc.)
-  - Actions: log only, email, or HTTP webhook
-- Web UI: colored border on thumbnails that triggered an alert
-- Cat tracking: log entries, time-of-day patterns
-- Raccoon/unexpected animal alerts via email/webhook
+### Analysis (`web/analyzer.py`)
+
+| Feature | Status |
+|---|---|
+| LLM backend: local llama.cpp (OpenAI-compatible API) | ✅ |
+| LLM backend: Anthropic Claude | ✅ |
+| Base64-encode thumbnail → send to LLM with configurable prompt | ✅ |
+| Background analysis queue — runs after thumbnail caching per connect/sync | ✅ |
+| Subject keyword extraction from LLM response | ✅ |
+| Store `analyzed` + `analysis_json` in `cache.db` (both `media` and `saved_media` tables) | ✅ |
+| SSE push `analysis_update` / `saved_analysis_update` to browser on completion | ✅ |
+| Re-analyze button in lightbox (force re-run on demand) | ✅ |
+| Analysis config persisted in `~/.gardepro/analysis_config.json` | ✅ |
+
+### Analysis UI
+
+| Feature | Status |
+|---|---|
+| Subject badge on thumbnail cards (raccoon 🦝, cat 🐱, person 🚶, etc.) | ✅ |
+| Colored thumbnail border by category (red=wild, blue=person, green=pet, orange=other) | ✅ |
+| Analysis description text shown in lightbox | ✅ |
+| Analysis Settings section in Settings tab (backend, URL, model, prompt, tokens, temp) | ✅ |
+
+### Alerting (`web/alerter.py`)
+
+| Feature | Status |
+|---|---|
+| Alert rules loaded from `~/.gardepro/alerts.yaml` at startup | ✅ |
+| Keyword matching against subjects + description | ✅ |
+| `action: log` — writes to server log | ✅ |
+| `action: email` — Gmail SMTP (requires env vars in `/etc/gardepro.env`) | ✅ |
+| Per-image dedup — never re-alert on the same photo | ✅ |
+| Per-rule cooldown — suppress repeat alerts within configurable window (default 30 min) | ✅ |
+| Per-rule enable/disable from Alert Settings UI | ✅ |
+| Alert Settings section in Settings tab (send alerts toggle, email status, cooldown, per-rule toggles) | ✅ |
+
+### Email setup
+
+To enable email alerts:
+1. Set `action: email` on the desired rule in `~/.gardepro/alerts.yaml`
+2. Add to `/etc/gardepro.env`:
+   ```
+   GARDEPRO_ALERT_EMAIL=you@gmail.com
+   GARDEPRO_ALERT_SMTP_PASSWORD=<gmail-app-password>
+   ```
+   Gmail App Password: myaccount.google.com → Security → App passwords
+3. `sudo systemctl restart gardepro`
+
+Email format — Subject: `GardePro alert: raccoon detected`; Body: plain text with
+detection name, image URL (`http://pi:8080/api/file/{id}/{kind}`), and analysis description.
+
+### Deferred to Phase 5
+
+- **HTTP webhook action** — `action: webhook` in alerts.yaml not yet implemented
+- **Cat tracking / time-of-day analytics** — no aggregation queries or UI panel for sighting patterns
+- **Alert rule editing from UI** — keywords and action type still require editing alerts.yaml directly
+
+---
+
+## Phase 5 — Analytics + Webhook Alerts (planned)
+
+### Webhook alert action
+
+- Add `action: webhook` support in `web/alerter.py`
+- Rule config: `webhook_url: https://...`
+- POST JSON payload: `{rule, subjects, description, image_url, timestamp}`
+- Enables integration with Home Assistant, ntfy, Pushover, etc.
+
+### Animal sighting analytics
+
+- DB query: aggregate detections by subject + hour-of-day / day-of-week
+- New UI panel (Settings tab or dedicated Analytics tab):
+  - Sighting frequency per animal type (bar chart or table)
+  - Time-of-day histogram (e.g., raccoon mostly 11pm–2am)
+  - Most recent sighting per animal type
+- Cat tracking: running log of all cat detections with timestamps
+
+### Alert rule management from UI
+
+- Read/write `~/.gardepro/alerts.yaml` from the web UI
+- Add/remove/edit rules: name, keywords list, action, webhook URL
+- No YAML editing required for basic rule management
 
 ---
 
@@ -260,7 +328,6 @@ upscaling. At 1920 px, each column is 320 px — exactly native resolution.
 |---|---|
 | `setGmtClock` params | Unknown format — needs app HTTP capture |
 | `setSetting` params | Unknown format — needs app HTTP capture |
-| LLM vision support | Confirm `qwen36-35b-a3b` accepts image inputs |
-| llama.cpp server port | Configurable — check devbox |
+| LLM vision support (local) | ✅ confirmed — llama.cpp with `qwen36-35b-a3b` + mmproj file |
 | Camera media count limit | Max observed ID ~437; no server-side count API |
 | Camera dual-mode STA/AP | Probe requests for home WiFi seen — unconfirmed if joinable |

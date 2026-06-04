@@ -23,6 +23,8 @@ _DEFAULTS = {
     ),
     "max_tokens": 800,
     "temperature": 0.1,
+    "alert_cooldown_minutes": 30,
+    "alert_rules_enabled": {},  # {} = all rules enabled; {"person": False} to disable specific rules
 }
 
 _KEYWORDS = [

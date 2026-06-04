@@ -2,6 +2,7 @@
 import logging
 import os
 import smtplib
+import time
 from email.message import EmailMessage
 from pathlib import Path
 
@@ -14,7 +15,8 @@ _ALERT_EMAIL   = os.environ.get("GARDEPRO_ALERT_EMAIL", "").strip()
 _SMTP_USER     = os.environ.get("GARDEPRO_ALERT_SMTP_USER", _ALERT_EMAIL).strip()
 _SMTP_PASSWORD = os.environ.get("GARDEPRO_ALERT_SMTP_PASSWORD", "").strip()
 
-_fired: set[tuple] = set()  # dedup within process lifetime
+_fired: set[tuple] = set()          # (media_id, kind, rule_name) — never re-alert same image
+_last_fired: dict[str, float] = {}  # rule_name → epoch of last alert (rate limiting)
 
 
 def load_rules(path: str) -> list[dict]:
@@ -52,6 +54,7 @@ def check_and_alert(
     kind: str,
     rules: list[dict],
     pi_host: str = "localhost:8080",
+    cooldown_seconds: float = 1800,
 ) -> list[str]:
     """Match analysis against rules; fire alerts. Returns list of triggered rule names."""
     if not rules:
@@ -60,6 +63,7 @@ def check_and_alert(
     subjects    = [s.lower() for s in (analysis.get("subjects") or [])]
     description = (analysis.get("description") or "").lower()
     triggered   = []
+    now         = time.time()
 
     for rule in rules:
         name     = rule.get("name", "unknown")
@@ -72,10 +76,20 @@ def check_and_alert(
         if not matched:
             continue
 
+        # Per-image dedup: never re-alert on the same photo
         dedup_key = (media_id, kind, name)
         if dedup_key in _fired:
             continue
         _fired.add(dedup_key)
+
+        # Rate limit: suppress if this rule fired within the cooldown window
+        if cooldown_seconds > 0 and now - _last_fired.get(name, 0) < cooldown_seconds:
+            remaining = int(cooldown_seconds - (now - _last_fired[name]))
+            logging.info("GardePro alert [%s]: suppressed (cooldown %ds remaining) for media %s/%s",
+                         name, remaining, media_id, kind)
+            continue
+
+        _last_fired[name] = now
         triggered.append(name)
 
         image_url = f"http://{pi_host}/api/file/{media_id}/{kind}"
