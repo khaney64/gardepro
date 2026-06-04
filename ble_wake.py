@@ -749,9 +749,11 @@ def linux_disconnect_wifi(iface):
     """Tear down the camera WiFi connection on iface (wlan0 is unaffected)."""
     print(f"  Disconnecting {iface} from camera network ...")
     _linux_kill_wpa_supplicant(iface)
+    # dhcpcd was run in one-shot mode (-1) so there is no daemon to kill;
+    # bringing the interface down is sufficient to release the address.
     try:
-        subprocess.run(["sudo", "dhcpcd", "-k", iface],
-                       timeout=10, capture_output=True)
+        subprocess.run(["sudo", "ip", "addr", "flush", "dev", iface],
+                       timeout=5, capture_output=True)
     except Exception:
         pass
     try:

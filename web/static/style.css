@@ -189,6 +189,17 @@ header {
 .thumb-card[data-media-kind="mp4"] {
   outline: 2px solid rgba(220,80,0,.35);
 }
+.thumb-card.alert-wild   { outline: 3px solid #e53e3e; }
+.thumb-card.alert-person { outline: 3px solid #3b82f6; }
+.thumb-card.alert-pet    { outline: 3px solid #22c55e; }
+.thumb-card.alert-animal { outline: 3px solid #f59e0b; }
+.analysis-badge {
+  position: absolute; bottom: 0; left: 0; right: 0;
+  padding: 3px 6px; font-size: .68em; font-weight: 600;
+  text-align: center; color: #fff;
+  background: linear-gradient(to top, rgba(0,0,0,.75) 0%, rgba(0,0,0,0) 100%);
+  text-shadow: 0 1px 2px rgba(0,0,0,.8);
+}
 .lb-error {
   color: rgba(255,255,255,.7);
   text-align: center; padding: 40px 20px; font-size: 1em; line-height: 1.6;
@@ -230,6 +241,8 @@ header {
 .lb-save:hover  { background: rgba(42,122,42,.9); }
 .lb-delete { background: rgba(192,57,43,.6); }
 .lb-delete:hover { background: rgba(192,57,43,.9); }
+.lb-reanalyze { background: rgba(50,90,180,.6); }
+.lb-reanalyze:hover { background: rgba(50,90,180,.9); }
 .saved-date-label {
   position: absolute; bottom: 0; left: 0; right: 0;
   background: rgba(0,0,0,.55); color: #fff;
@@ -238,12 +251,13 @@ header {
 }
 .lb-counter { color: rgba(255,255,255,.7); font-size: .9em; }
 .lb-content {
-  max-width: 95vw; max-height: 85vh;
-  display: flex; align-items: center; justify-content: center;
+  max-width: 95vw; max-height: 90vh;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  overflow-y: auto;
   touch-action: pinch-zoom;
 }
-.lb-content img  { max-width: 95vw; max-height: 85vh; object-fit: contain; border-radius: 4px; }
-.lb-content video{ max-width: 95vw; max-height: 85vh; border-radius: 4px; }
+.lb-content img  { max-width: 95vw; max-height: 75vh; object-fit: contain; border-radius: 4px; }
+.lb-content video{ max-width: 95vw; max-height: 75vh; border-radius: 4px; }
 .lb-arrow {
   position: absolute; top: 50%; transform: translateY(-50%);
   color: rgba(255,255,255,.6); font-size: 2.5em;
@@ -286,6 +300,37 @@ header {
 .settings-table td { padding: 8px 4px; border-bottom: 1px solid var(--border); }
 .settings-table td:first-child { font-weight: 600; width: 45%; color: var(--text-muted); }
 .action-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
+
+/* ── Analysis settings form ── */
+.settings-section:first-child { margin-top: 0; }
+.settings-form { display: flex; flex-direction: column; gap: 12px; }
+.form-row { display: flex; align-items: center; gap: 12px; }
+.form-row label:first-child { min-width: 110px; font-weight: 600; font-size: .9em; flex-shrink: 0; }
+.form-row input[type="text"],
+.form-row input[type="number"],
+.form-row select { flex: 1; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg); color: var(--text); font: inherit; font-size: .9em; }
+.form-row-top { align-items: flex-start; }
+.form-row-top label:first-child { margin-top: 6px; }
+.form-row textarea { flex: 1; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg); color: var(--text); font: inherit; font-size: .9em;
+  resize: vertical; min-height: 60px; }
+.form-actions { justify-content: flex-end; gap: 10px; }
+
+/* iOS-style toggle switch */
+.toggle { position: relative; display: inline-block; width: 44px; height: 24px; flex-shrink: 0; }
+.toggle input { opacity: 0; width: 0; height: 0; }
+.toggle-slider {
+  position: absolute; inset: 0; border-radius: 24px;
+  background: #ccc; cursor: pointer; transition: background .2s;
+}
+.toggle-slider::before {
+  content: ''; position: absolute; width: 18px; height: 18px; border-radius: 50%;
+  left: 3px; top: 3px; background: #fff;
+  box-shadow: 0 1px 3px rgba(0,0,0,.3); transition: transform .2s;
+}
+.toggle input:checked + .toggle-slider { background: var(--primary); }
+.toggle input:checked + .toggle-slider::before { transform: translateX(20px); }
 
 /* ── Bottom nav (mobile only) ── */
 .bottom-nav {
@@ -379,6 +424,11 @@ header {
 .lb-offline-note {
   text-align: center; margin-top: 10px;
   color: rgba(255,255,255,.6); font-size: .82em;
+}
+.lb-analysis {
+  text-align: center; margin: 8px 16px 0;
+  color: rgba(255,255,255,.55); font-size: .8em; font-style: italic;
+  line-height: 1.4;
 }
 
 /* ── Connection progress modal ── */

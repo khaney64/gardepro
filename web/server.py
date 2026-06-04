@@ -8,13 +8,18 @@ Run:   cd /home/<user>/gardepro/web
        GARDEPRO_WIFI_PASSWORD=<pw> python3 -m uvicorn server:app --host 0.0.0.0 --port 8080
 
 Environment variables:
-  GARDEPRO_WIFI_PASSWORD   Camera WiFi password (required for connect)
-  GARDEPRO_BLE_ADDRESS     BLE address to skip scanning, e.g. AA:BB:CC:DD:EE:FF
-  GARDEPRO_BLE_ADAPTER     Bluetooth HCI adapter (default: hci0)
-  GARDEPRO_WIFI_IFACE      WiFi interface for camera (default: first wlx* found)
-  GARDEPRO_RTSP_PORT       Local port for RTSP TCP proxy (default: 8554)
-  GARDEPRO_AUTO_CONNECT    Set to 1 to enable periodic background sync
-  GARDEPRO_SYNC_INTERVAL   Seconds between auto-sync attempts (default: 600)
+  GARDEPRO_WIFI_PASSWORD          Camera WiFi password (required for connect)
+  GARDEPRO_BLE_ADDRESS            BLE address to skip scanning, e.g. AA:BB:CC:DD:EE:FF
+  GARDEPRO_BLE_ADAPTER            Bluetooth HCI adapter (default: hci0)
+  GARDEPRO_WIFI_IFACE             WiFi interface for camera (default: first wlx* found)
+  GARDEPRO_RTSP_PORT              Local port for RTSP TCP proxy (default: 8554)
+  GARDEPRO_AUTO_CONNECT           Set to 1 to enable periodic background sync
+  GARDEPRO_SYNC_INTERVAL          Seconds between auto-sync attempts (default: 600)
+  GARDEPRO_LLM_URL                Base URL of llama.cpp OpenAI API (default: http://devbox.lan:8080)
+  GARDEPRO_LLM_MODEL              Model name for vision analysis (required for analysis)
+  GARDEPRO_ALERT_EMAIL            Recipient address for email alerts
+  GARDEPRO_ALERT_SMTP_USER        Gmail sender address (defaults to GARDEPRO_ALERT_EMAIL)
+  GARDEPRO_ALERT_SMTP_PASSWORD    Gmail app password
 """
 
 import asyncio
@@ -53,6 +58,8 @@ from ble_wake import (
 from bleak import BleakClient
 
 from db import CacheDB, THUMB_DIR, FILES_DIR, SAVED_DIR
+import analyzer
+import alerter
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -101,6 +108,8 @@ _thumb_cache_task:  Optional[asyncio.Task] = None
 _rtsp_server       = None
 _hls_proc          = None
 _shutting_down      = False
+_alert_rules:       list[dict] = []
+_analysis_config:   dict = {}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -362,6 +371,44 @@ async def _sync_cache():
     """Re-enumerate and cache new thumbnails on an existing connection."""
     await _enumerate_media()
     await _thumb_cache_loop()
+    await _analysis_loop()
+
+
+async def _analysis_loop():
+    """Analyze unanalyzed cached thumbnails with LLM and fire alerts."""
+    if not _analysis_config.get("analyze_enabled", True):
+        return
+    pending = await asyncio.to_thread(_db.get_unanalyzed_media)
+    if not pending:
+        return
+    await _log(f"Analysis: processing {len(pending)} image(s)…")
+    pi_host = f"{_get_pi_ip()}:8080"
+    cfg = dict(_analysis_config)
+    for item in pending:
+        id_, kind, thumb_path = item["id"], item["kind"], item.get("thumb_path") or ""
+        if not thumb_path or not Path(thumb_path).exists():
+            continue
+        await _log(f"Analysis: [{kind.upper()} {id_}] analyzing…")
+        result = await analyzer.analyze_image(thumb_path, cfg)
+        result_json = json.dumps(result)
+        await asyncio.to_thread(_db.update_analysis, id_, kind, result_json)
+        subjects = result.get("subjects", [])
+        await _broadcast({"type": "analysis_update", "id": id_, "kind": kind,
+                          "subjects": subjects, "description": result.get("description", "")})
+        if result.get("error"):
+            await _log(f"Analysis: [{kind.upper()} {id_}] error — {result['error']}")
+        else:
+            subj_str = ', '.join(subjects) if subjects else 'nothing detected'
+            snippet  = result.get('description', '').replace('\n', ' ')[:200]
+            engine   = result.get('engine', '')
+            await _log(f"Analysis: [{kind.upper()} {id_}] {subj_str} | {snippet}" + (f" [{engine}]" if engine else ""))
+        if _alert_rules and subjects and _analysis_config.get("alerts_enabled", False):
+            triggered = await asyncio.to_thread(
+                alerter.check_and_alert, result, id_, kind, _alert_rules, pi_host
+            )
+            if triggered:
+                await _log(f"Analysis: alert triggered — {', '.join(triggered)} (media {id_}/{kind})")
+    await _log("Analysis: done")
 
 
 async def _auto_sync_loop():
@@ -390,6 +437,7 @@ async def _auto_sync_loop():
                             await _thumb_cache_task
                         except Exception:
                             pass
+                    await _analysis_loop()
                     await _disconnect_flow()
                     await _log("Auto-sync: completed successfully")
                 else:
@@ -491,6 +539,13 @@ async def _connection_flow():
         _background_tasks.append(asyncio.create_task(_signal_poll_loop(iface)))
         _thumb_cache_task = asyncio.create_task(_thumb_cache_loop())
         _background_tasks.append(_thumb_cache_task)
+        async def _chain_analysis():
+            try:
+                await _thumb_cache_task
+            except Exception:
+                pass
+            await _analysis_loop()
+        _background_tasks.append(asyncio.create_task(_chain_analysis()))
 
     except asyncio.CancelledError:
         await _log("Connection cancelled")
@@ -608,6 +663,13 @@ async def _resume_session(iface: str, my_ip: str):
         _background_tasks.append(asyncio.create_task(_signal_poll_loop(iface)))
         _thumb_cache_task = asyncio.create_task(_thumb_cache_loop())
         _background_tasks.append(_thumb_cache_task)
+        async def _chain_analysis_resume():
+            try:
+                await _thumb_cache_task
+            except Exception:
+                pass
+            await _analysis_loop()
+        _background_tasks.append(asyncio.create_task(_chain_analysis_resume()))
     except Exception as exc:
         await _log(f"Startup: session resume failed — {exc}")
         await _restore_cached(str(exc))
@@ -615,9 +677,13 @@ async def _resume_session(iface: str, my_ip: str):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _media
+    global _media, _alert_rules
     # Open cache DB and restore media list for offline gallery
     _db.open()
+    _analysis_config.update(analyzer._load_config())
+    _alert_rules = alerter.load_rules("~/.gardepro/alerts.yaml")
+    if _alert_rules:
+        _log_sync(f"Loaded {len(_alert_rules)} alert rule(s) from ~/.gardepro/alerts.yaml")
     all_rows = await asyncio.to_thread(_db.get_all_media)
     if all_rows:
         _media = [{"id": r["id"], "kind": r["kind"]} for r in all_rows]
@@ -800,6 +866,111 @@ async def api_media(page: int = 0, size: int = 24):
     }
 
 
+@app.get("/api/analysis")
+async def api_analysis():
+    """Return analysis results for all analyzed media, keyed by 'id:kind'."""
+    rows = await asyncio.to_thread(_db.get_media_with_analysis)
+    result = {}
+    for row in rows:
+        key = f"{row['id']}:{row['kind']}"
+        try:
+            result[key] = json.loads(row["analysis_json"])
+        except Exception:
+            pass
+    return result
+
+
+@app.get("/api/analysis/config")
+async def api_analysis_config_get():
+    return {
+        **_analysis_config,
+        "anthropic_key_set": bool(os.environ.get("ANTHROPIC_API_KEY")),
+    }
+
+
+@app.post("/api/analysis/config")
+async def api_analysis_config_set(body: dict):
+    allowed = {
+        "analyze_enabled": bool,
+        "alerts_enabled": bool,
+        "backend": str,
+        "llm_url": str,
+        "llm_model": str,
+        "anthropic_model": str,
+        "prompt": str,
+        "max_tokens": int,
+        "temperature": float,
+    }
+    update = {}
+    for key, typ in allowed.items():
+        if key in body:
+            try:
+                update[key] = typ(body[key])
+            except (ValueError, TypeError):
+                raise HTTPException(400, f"Invalid value for {key!r}")
+    saved = await asyncio.to_thread(analyzer.save_config, update)
+    _analysis_config.update(saved)
+    return {**_analysis_config, "anthropic_key_set": bool(os.environ.get("ANTHROPIC_API_KEY"))}
+
+
+@app.post("/api/analysis/run/saved/{saved_id}")
+async def api_analysis_run_saved(saved_id: int):
+    """Force re-analyze a saved media item using current config."""
+    item = await asyncio.to_thread(_db.get_saved_by_id, saved_id)
+    if not item:
+        raise HTTPException(404, "Saved item not found")
+    thumb = item.get("thumb_path") or ""
+    if not thumb or not Path(thumb).exists():
+        raise HTTPException(404, "Thumbnail not found — may have been moved")
+    await _log(f"Analysis: [SAVED {saved_id}] analyzing…")
+    result = await analyzer.analyze_image(thumb, _analysis_config)
+    await asyncio.to_thread(_db.update_saved_analysis, saved_id, json.dumps(result))
+    subjects = result.get("subjects", [])
+    await _broadcast({"type": "saved_analysis_update", "saved_id": saved_id,
+                      "subjects": subjects,
+                      "description": result.get("description", "")})
+    if result.get("error"):
+        await _log(f"Analysis: [SAVED {saved_id}] error — {result['error']}")
+    else:
+        subj_str = ', '.join(subjects) if subjects else 'nothing detected'
+        snippet  = result.get('description', '').replace('\n', ' ')[:200]
+        engine   = result.get('engine', '')
+        await _log(f"Analysis: [SAVED {saved_id}] {subj_str} | {snippet}" + (f" [{engine}]" if engine else ""))
+    return {"saved_id": saved_id, **result}
+
+
+@app.post("/api/analysis/run/{media_id}/{kind}")
+async def api_analysis_run(media_id: int, kind: str):
+    """Force re-analyze a single media item using current config."""
+    kind_lower = kind.lower()
+    cached = THUMB_DIR / f"{media_id}_{kind_lower}.jpg"
+    if not cached.exists():
+        raise HTTPException(404, "Thumbnail not cached — connect to camera first")
+    await _log(f"Analysis: [{kind_lower.upper()} {media_id}] analyzing…")
+    # Reset analyzed flag so it re-runs
+    await asyncio.to_thread(_db.update_analysis, media_id, kind_lower, json.dumps({"subjects": [], "description": "", "pending": True}))
+    result = await analyzer.analyze_image(str(cached), _analysis_config)
+    await asyncio.to_thread(_db.update_analysis, media_id, kind_lower, json.dumps(result))
+    subjects = result.get("subjects", [])
+    await _broadcast({"type": "analysis_update", "id": media_id, "kind": kind_lower,
+                      "subjects": subjects, "description": result.get("description", "")})
+    if result.get("error"):
+        await _log(f"Analysis: [{kind_lower.upper()} {media_id}] error — {result['error']}")
+    else:
+        subj_str = ', '.join(subjects) if subjects else 'nothing detected'
+        snippet  = result.get('description', '').replace('\n', ' ')[:200]
+        engine   = result.get('engine', '')
+        await _log(f"Analysis: [{kind_lower.upper()} {media_id}] {subj_str} | {snippet}" + (f" [{engine}]" if engine else ""))
+    if _alert_rules and subjects and _analysis_config.get("alerts_enabled", False):
+        pi_host = f"{_get_pi_ip()}:8080"
+        triggered = await asyncio.to_thread(
+            alerter.check_and_alert, result, media_id, kind_lower, _alert_rules, pi_host
+        )
+        if triggered:
+            await _log(f"Analysis: alert triggered — {', '.join(triggered)} (media {media_id}/{kind_lower})")
+    return {"id": media_id, "kind": kind_lower, **result}
+
+
 @app.get("/api/thumb/{media_id}/{kind}")
 async def api_thumb(media_id: int, kind: str):
     # Serve from local cache first (works offline)
@@ -951,7 +1122,19 @@ async def api_save(media_id: int, kind: str):
 
 @app.get("/api/saved")
 async def api_saved():
-    items = await asyncio.to_thread(_db.get_saved_media)
+    rows = await asyncio.to_thread(_db.get_saved_media)
+    items = []
+    for row in rows:
+        item = dict(row)
+        if item.get("analysis_json"):
+            try:
+                item["analysis"] = json.loads(item["analysis_json"])
+            except Exception:
+                item["analysis"] = None
+        else:
+            item["analysis"] = None
+        del item["analysis_json"]
+        items.append(item)
     return {"items": items}
 
 

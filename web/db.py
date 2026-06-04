@@ -30,12 +30,14 @@ CREATE TABLE IF NOT EXISTS media (
     PRIMARY KEY (id, kind)
 );
 CREATE TABLE IF NOT EXISTS saved_media (
-    saved_id   INTEGER PRIMARY KEY AUTOINCREMENT,
-    cam_id     INTEGER NOT NULL,
-    kind       TEXT    NOT NULL,
-    saved_at   TEXT    NOT NULL,
-    thumb_path TEXT,
-    file_path  TEXT
+    saved_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    cam_id        INTEGER NOT NULL,
+    kind          TEXT    NOT NULL,
+    saved_at      TEXT    NOT NULL,
+    thumb_path    TEXT,
+    file_path     TEXT,
+    analyzed      INTEGER NOT NULL DEFAULT 0,
+    analysis_json TEXT
 );
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -64,6 +66,12 @@ class CacheDB:
                           ("captured_at",  "TEXT")]:
             try:
                 self._conn.execute(f"ALTER TABLE media ADD COLUMN {col} {defn}")
+            except Exception:
+                pass  # already exists
+        for col, defn in [("analyzed",      "INTEGER NOT NULL DEFAULT 0"),
+                          ("analysis_json", "TEXT")]:
+            try:
+                self._conn.execute(f"ALTER TABLE saved_media ADD COLUMN {col} {defn}")
             except Exception:
                 pass  # already exists
 
@@ -122,6 +130,24 @@ class CacheDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_unanalyzed_media(self) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT id, kind, thumb_path FROM media WHERE analyzed=0 AND thumb_cached=1"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_analysis(self, id: int, kind: str, analysis_json: str) -> None:
+        self._conn.execute(
+            "UPDATE media SET analyzed=1, analysis_json=? WHERE id=? AND kind=?",
+            (analysis_json, id, kind),
+        )
+
+    def get_media_with_analysis(self) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT id, kind, analysis_json FROM media WHERE analyzed=1"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     # ── Saved media ───────────────────────────────────────────────────────────
 
     def save_media(self, cam_id: int, kind: str, saved_at: str,
@@ -135,17 +161,26 @@ class CacheDB:
 
     def get_saved_media(self) -> list[dict]:
         rows = self._conn.execute(
-            """SELECT saved_id, cam_id, kind, saved_at, thumb_path, file_path
+            """SELECT saved_id, cam_id, kind, saved_at, thumb_path, file_path,
+                      analyzed, analysis_json
                FROM saved_media ORDER BY saved_at DESC"""
         ).fetchall()
         return [dict(r) for r in rows]
 
     def get_saved_by_id(self, saved_id: int) -> Optional[dict]:
         row = self._conn.execute(
-            "SELECT saved_id, cam_id, kind, saved_at, thumb_path, file_path FROM saved_media WHERE saved_id=?",
+            """SELECT saved_id, cam_id, kind, saved_at, thumb_path, file_path,
+                      analyzed, analysis_json
+               FROM saved_media WHERE saved_id=?""",
             (saved_id,)
         ).fetchone()
         return dict(row) if row else None
+
+    def update_saved_analysis(self, saved_id: int, analysis_json: str) -> None:
+        self._conn.execute(
+            "UPDATE saved_media SET analyzed=1, analysis_json=? WHERE saved_id=?",
+            (analysis_json, saved_id),
+        )
 
     def delete_saved(self, saved_id: int) -> Optional[dict]:
         row = self._conn.execute(

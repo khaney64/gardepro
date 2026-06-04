@@ -26,6 +26,9 @@ const S = {
   lightboxSource: 'gallery', // 'gallery' | 'local'
   localItems: [],
   modalOpen: false,
+
+  // Analysis: Map of "id:kind" → {subjects, description}
+  analysis: {},
 };
 
 let evtSource = null;
@@ -64,9 +67,11 @@ function handleEvent(data) {
 
     if (!wasConnected && S.status === 'connected') {
       fetchMedia();
+      fetchAnalysis();
     } else if (wasDisconnected && S.status === 'disconnected' && S.mediaCount > 0 && S.media.length === 0) {
       // Server restarted with cached media — load gallery immediately
       fetchMedia();
+      fetchAnalysis();
     }
     updateUI();
 
@@ -91,6 +96,19 @@ function handleEvent(data) {
   } else if (data.type === 'media_deleted') {
     S.media = S.media.filter(m => !(m.id === data.id && m.kind === data.kind));
     renderGallery();
+
+  } else if (data.type === 'analysis_update') {
+    const key = `${data.id}:${data.kind}`;
+    S.analysis[key] = { subjects: data.subjects || [], description: data.description || '' };
+    const cards = document.querySelectorAll(`#gallery-grid .thumb-card[data-media-id="${data.id}"][data-media-kind="${data.kind}"]`);
+    cards.forEach(card => applyAnalysisToCard(card, data.id, data.kind));
+
+  } else if (data.type === 'saved_analysis_update') {
+    const result = { subjects: data.subjects || [], description: data.description || '' };
+    const item = S.localItems.find(i => i.saved_id === data.saved_id);
+    if (item) item.analysis = result;
+    const cards = document.querySelectorAll(`#local-grid .thumb-card[data-saved-id="${data.saved_id}"]`);
+    cards.forEach(card => applyAnalysisToLocalCard(card, result));
   }
 }
 
@@ -158,6 +176,13 @@ async function fetchMedia() {
   renderGallery();
 }
 
+async function fetchAnalysis() {
+  try {
+    const r = await fetch('/api/analysis');
+    if (r.ok) S.analysis = await r.json();
+  } catch (_) {}
+}
+
 async function deleteFile(id, kind) {
   const r = await fetch(`/api/file/${id}/${kind}`, { method: 'DELETE' });
   if (!r.ok) {
@@ -174,7 +199,7 @@ function updateUI() {
   const connected = S.status === 'connected';
   const connecting = S.status === 'connecting' || S.status === 'disconnecting';
   const hasCached = S.mediaCount > 0;
-  const showApp = connected || hasCached;
+  const showApp = connected || hasCached || connecting;
 
   // Show app (gallery, header, nav) when connected OR when cache has media
   show('connect-panel', !showApp);
@@ -259,7 +284,7 @@ function showTab(tab) {
     b.classList.toggle('active', b.dataset.tab === tab);
   });
   if (tab === 'live')     updateLiveTab();
-  if (tab === 'settings') updateSettingsTab();
+  if (tab === 'settings') { updateSettingsTab(); loadAnalysisConfig(); }
   if (tab === 'logs')     fetchLogs();
   if (tab === 'local')    loadLocalMedia();
 }
@@ -298,11 +323,65 @@ function renderGallery() {
   });
 }
 
+const _SUBJECT_PRIORITY = ['raccoon', 'bear', 'coyote', 'person', 'human', 'legs', 'fox', 'deer', 'cat', 'dog'];
+const _SUBJECT_LABELS = {
+  raccoon: '🦝 raccoon', bear: '🐻 bear', coyote: '🐺 coyote',
+  person: '🚶 person', human: '🚶 person', legs: '🚶 person',
+  fox: '🦊 fox', deer: '🦌 deer', cat: '🐱 cat', dog: '🐶 dog',
+  squirrel: '🐿 squirrel', rabbit: '🐇 rabbit', bird: '🐦 bird',
+  skunk: '🦨 skunk', turkey: '🦃 turkey', possum: '🐾 possum',
+};
+
+function topSubject(subjects) {
+  if (!subjects || !subjects.length) return null;
+  return _SUBJECT_PRIORITY.find(s => subjects.includes(s)) || subjects[0];
+}
+
+function subjectAlertClass(subject) {
+  if (!subject) return null;
+  if (['raccoon', 'bear', 'coyote', 'skunk'].includes(subject)) return 'alert-wild';
+  if (['person', 'human', 'legs'].includes(subject)) return 'alert-person';
+  if (['cat', 'dog'].includes(subject)) return 'alert-pet';
+  return 'alert-animal';
+}
+
+function applyAnalysisToLocalCard(card, analysis) {
+  card.classList.remove('alert-wild', 'alert-person', 'alert-pet', 'alert-animal');
+  const oldBadge = card.querySelector('.analysis-badge');
+  if (oldBadge) oldBadge.remove();
+  if (!analysis || !analysis.subjects || !analysis.subjects.length) return;
+  const top = topSubject(analysis.subjects);
+  const cls = subjectAlertClass(top);
+  if (cls) card.classList.add(cls);
+  const badge = document.createElement('div');
+  badge.className = 'analysis-badge';
+  badge.textContent = analysis.subjects.map(s => _SUBJECT_LABELS[s] || s).join(' · ');
+  card.appendChild(badge);
+}
+
+function applyAnalysisToCard(card, id, kind) {
+  const key = `${id}:${kind}`;
+  const analysis = S.analysis[key];
+  // Remove old analysis classes and badge
+  card.classList.remove('alert-wild', 'alert-person', 'alert-pet', 'alert-animal');
+  const oldBadge = card.querySelector('.analysis-badge');
+  if (oldBadge) oldBadge.remove();
+  if (!analysis || !analysis.subjects || !analysis.subjects.length) return;
+  const top = topSubject(analysis.subjects);
+  const cls = subjectAlertClass(top);
+  if (cls) card.classList.add(cls);
+  const badge = document.createElement('div');
+  badge.className = 'analysis-badge';
+  badge.textContent = analysis.subjects.map(s => _SUBJECT_LABELS[s] || s).join(' · ');
+  card.appendChild(badge);
+}
+
 function makeThumbCard(item, idx) {
   const card = document.createElement('div');
   const key = `${item.id}:${item.kind}`;
   card.className = 'thumb-card' + (S.selected.has(key) ? ' selected' : '');
   card.dataset.mediaKind = item.kind;
+  card.dataset.mediaId   = item.id;
 
   const img = document.createElement('img');
   img.src = `/api/thumb/${item.id}/${item.kind}`;
@@ -317,6 +396,8 @@ function makeThumbCard(item, idx) {
     badge.textContent = '▶ MP4';
     card.appendChild(badge);
   }
+
+  applyAnalysisToCard(card, item.id, item.kind);
 
   const check = document.createElement('div');
   check.className = 'thumb-check';
@@ -474,6 +555,17 @@ function renderLightboxItem() {
   const saveBtn = el('lb-save-btn');
   if (saveBtn) saveBtn.classList.toggle('hidden', isLocal);
 
+  // Re-analyze: available for both gallery and local items
+  const reBtn = el('lb-reanalyze-btn');
+  if (reBtn) {
+    reBtn.classList.remove('hidden');
+    reBtn.dataset.savedId = isLocal ? (item.saved_id || '') : '';
+    reBtn.dataset.id      = isLocal ? (item.cam_id || '') : item.id;
+    reBtn.dataset.kind    = item.kind;
+    reBtn.textContent     = '🔬';
+    reBtn.disabled        = false;
+  }
+
   if (item.kind === 'jpg') {
     const img = document.createElement('img');
     img.alt = isLocal ? `Saved photo` : `Photo ${item.id}`;
@@ -507,10 +599,28 @@ function renderLightboxItem() {
             ? 'Connect to play video'
             : 'Could not load video. The file may still be transferring.');
       content.appendChild(note);
+      appendAnalysisText(content);
     };
     video.src = fileUrl;
     content.appendChild(video);
   }
+
+  // Analysis description — rendered below image/video for both gallery and local items
+  function appendAnalysisText(container) {
+    let analysis = null;
+    if (isLocal) {
+      analysis = item.analysis || null;
+    } else {
+      const aKey = `${item.id}:${item.kind}`;
+      analysis = S.analysis[aKey] || null;
+    }
+    const desc = document.createElement('p');
+    desc.id = 'lb-analysis-text';
+    desc.className = 'lb-analysis';
+    desc.textContent = (analysis && analysis.description) ? analysis.description : '';
+    container.appendChild(desc);
+  }
+  appendAnalysisText(content);
 }
 
 function closeLightbox() {
@@ -564,6 +674,49 @@ async function lightboxDelete() {
   }
 }
 
+async function lightboxReanalyze() {
+  const btn     = el('lb-reanalyze-btn');
+  const isLocal = S.lightboxSource === 'local';
+  const savedId = parseInt(btn.dataset.savedId, 10);
+  const id      = parseInt(btn.dataset.id, 10);
+  const kind    = btn.dataset.kind;
+  btn.textContent = '⏳';
+  btn.disabled = true;
+  try {
+    const url = isLocal
+      ? `/api/analysis/run/saved/${savedId}`
+      : `/api/analysis/run/${id}/${kind}`;
+    const r = await fetch(url, { method: 'POST' });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      alert(`Re-analyze failed: ${d.detail || r.status}`);
+      return;
+    }
+    const result = { subjects: d.subjects || [], description: d.description || '' };
+    // Update the analysis text in lightbox in-place
+    const descEl = document.getElementById('lb-analysis-text');
+    if (descEl) descEl.textContent = result.description;
+    if (isLocal) {
+      // Update the in-memory local item so lightbox re-opens correctly
+      const item = S.localItems.find(i => i.saved_id === savedId);
+      if (item) item.analysis = result;
+      // Refresh local grid card
+      const cards = document.querySelectorAll(`#local-grid .thumb-card[data-saved-id="${savedId}"]`);
+      cards.forEach(card => applyAnalysisToLocalCard(card, result));
+    } else {
+      const key = `${id}:${kind}`;
+      S.analysis[key] = result;
+      const cards = document.querySelectorAll(`#gallery-grid .thumb-card[data-media-id="${id}"][data-media-kind="${kind}"]`);
+      cards.forEach(card => applyAnalysisToCard(card, id, kind));
+    }
+  } catch (e) {
+    alert(`Re-analyze failed: ${e.message}`);
+  } finally {
+    btn.textContent = '🔬';
+    btn.disabled = false;
+  }
+}
+
 async function lightboxSave() {
   const item = S.pageItems[S.lightboxIdx];
   if (!item) return;
@@ -600,6 +753,65 @@ function updateSettingsTab() {
   const connected = S.status === 'connected';
   show('settings-disconnected', !connected);
   show('settings-content', connected);
+}
+
+async function loadAnalysisConfig() {
+  try {
+    const r = await fetch('/api/analysis/config');
+    if (!r.ok) return;
+    const d = await r.json();
+    el('analysis-enabled').checked   = !!d.analyze_enabled;
+    el('alerts-enabled').checked     = !!d.alerts_enabled;
+    el('analysis-backend').value     = d.backend || 'llm';
+    el('analysis-llm-url').value     = d.llm_url || '';
+    el('analysis-llm-model').value   = d.llm_model || '';
+    el('analysis-anthropic-model').value = d.anthropic_model || '';
+    el('analysis-key-status').textContent = d.anthropic_key_set ? '✓ API key set' : '✗ API key not set in /etc/gardepro.env';
+    el('analysis-prompt').value      = d.prompt || '';
+    el('analysis-max-tokens').value  = d.max_tokens || 800;
+    const temp = parseFloat(d.temperature ?? 0.1);
+    el('analysis-temperature').value = temp;
+    el('analysis-temp-val').textContent = temp.toFixed(2);
+    toggleAnalysisBackend();
+  } catch (_) {}
+}
+
+function toggleAnalysisBackend() {
+  const isLlm = el('analysis-backend').value === 'llm';
+  show('analysis-llm-fields', isLlm);
+  show('analysis-anthropic-fields', !isLlm);
+}
+
+async function saveAnalysisConfig() {
+  const status = el('analysis-save-status');
+  status.textContent = 'Saving…';
+  try {
+    const body = {
+      analyze_enabled:   el('analysis-enabled').checked,
+      alerts_enabled:    el('alerts-enabled').checked,
+      backend:           el('analysis-backend').value,
+      llm_url:           el('analysis-llm-url').value.trim(),
+      llm_model:         el('analysis-llm-model').value.trim(),
+      anthropic_model:   el('analysis-anthropic-model').value.trim(),
+      prompt:            el('analysis-prompt').value,
+      max_tokens:        parseInt(el('analysis-max-tokens').value, 10),
+      temperature:       parseFloat(el('analysis-temperature').value),
+    };
+    const r = await fetch('/api/analysis/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      status.textContent = 'Error: ' + (d.detail || r.status);
+      return;
+    }
+    status.textContent = '✓ Saved';
+    setTimeout(() => { status.textContent = ''; }, 2500);
+  } catch (e) {
+    status.textContent = 'Error: ' + e.message;
+  }
 }
 
 // ── Live streaming ─────────────────────────────────────────────────────────────
@@ -781,12 +993,15 @@ function formatRelativeTime(isoStr) {
 
 function formatEventAge(isoStr) {
   if (!isoStr) return 'never';
-  const diff = (Date.now() - new Date(isoStr).getTime()) / 1000;
-  if (diff < 60)    { const s = Math.round(diff);    return s + (s === 1 ? ' second' : ' seconds'); }
-  if (diff < 3600)  { const m = Math.round(diff/60); return m + (m === 1 ? ' minute' : ' minutes'); }
-  if (diff < 86400) { const h = Math.round(diff/3600);return h + (h === 1 ? ' hour'   : ' hours');   }
-  const d = Math.round(diff / 86400);
-  return d + (d === 1 ? ' day' : ' days');
+  const diff = Math.abs((Date.now() - new Date(isoStr).getTime()) / 1000);
+  if (diff < 60)       { const s  = Math.floor(diff);           return s  + (s  === 1 ? ' second' : ' seconds') + ' ago'; }
+  if (diff < 3600)     { const m  = Math.floor(diff / 60);      return m  + (m  === 1 ? ' minute' : ' minutes') + ' ago'; }
+  if (diff < 86400)    { const h  = Math.floor(diff / 3600);    return h  + (h  === 1 ? ' hour'   : ' hours')   + ' ago'; }
+  if (diff < 604800)   { const d  = Math.floor(diff / 86400);   return d  + (d  === 1 ? ' day'    : ' days')    + ' ago'; }
+  if (diff < 2592000)  { const w  = Math.floor(diff / 604800);  return w  + (w  === 1 ? ' week'   : ' weeks')   + ' ago'; }
+  if (diff < 31536000) { const mo = Math.floor(diff / 2592000); return mo + (mo === 1 ? ' month'  : ' months')  + ' ago'; }
+  const y = Math.floor(diff / 31536000);
+  return y + (y === 1 ? ' year' : ' years') + ' ago';
 }
 
 // ── Local tab ─────────────────────────────────────────────────────────────────
@@ -821,6 +1036,7 @@ function makeLocalThumbCard(item, idx) {
   const card = document.createElement('div');
   card.className = 'thumb-card';
   card.dataset.mediaKind = item.kind;
+  card.dataset.savedId   = item.saved_id;
 
   const img = document.createElement('img');
   img.src = `/api/saved/thumb/${item.saved_id}`;
@@ -835,6 +1051,8 @@ function makeLocalThumbCard(item, idx) {
     badge.textContent = '▶ MP4';
     card.appendChild(badge);
   }
+
+  if (item.analysis) applyAnalysisToLocalCard(card, item.analysis);
 
   const dateLabel = document.createElement('div');
   dateLabel.className = 'saved-date-label';
@@ -909,5 +1127,8 @@ updateSortBtn();
 
 // Refresh relative timestamps every 60 s so "last synced/event" doesn't go stale
 setInterval(() => { updateOfflineBar(); updateLastEvent(); }, 60000);
+
+// Load cached analysis data on startup so borders show even before connecting
+fetchAnalysis();
 
 startSSE();
