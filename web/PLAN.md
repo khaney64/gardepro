@@ -64,6 +64,13 @@ sudo systemctl daemon-reload && sudo systemctl enable --now gardepro
 | `GARDEPRO_RTSP_PORT` | `8554` | Local port for RTSP TCP proxy |
 | `GARDEPRO_AUTO_CONNECT` | `0` | Set to `1` to enable periodic background sync |
 | `GARDEPRO_SYNC_INTERVAL` | `600` | Seconds between auto-sync attempts |
+| `GARDEPRO_ALERT_EMAIL` | — | Recipient address for email alerts |
+| `GARDEPRO_ALERT_FROM_EMAIL` | `GARDEPRO_ALERT_EMAIL` | Sender address (if different from recipient) |
+| `GARDEPRO_ALERT_SMTP_HOST` | `smtp.gmail.com` | SMTP server hostname |
+| `GARDEPRO_ALERT_SMTP_PORT` | `587` | SMTP server port |
+| `GARDEPRO_ALERT_SMTP_SSL` | auto (465=SSL) | Set to `1` to force implicit SSL; default uses STARTTLS |
+| `GARDEPRO_ALERT_SMTP_USER` | `GARDEPRO_ALERT_FROM_EMAIL` | SMTP auth username (use API token for Postmark) |
+| `GARDEPRO_ALERT_SMTP_PASSWORD` | — | SMTP password or app password |
 
 ---
 
@@ -118,7 +125,7 @@ the camera serves the same underlying media either way.
 | HLS stops automatically when switching away from Live tab | ✅ |
 | HLS.js from CDN; low-latency config (`liveSyncDurationCount: 2`) | ✅ |
 | Settings tab: camera config table + Format SD button | ✅ |
-| Thumbnail browser caching (`Cache-Control: public, max-age=3600`) | ✅ |
+| Thumbnail browser caching (`Cache-Control: no-cache` + ETag for revalidation) | ✅ |
 
 ---
 
@@ -267,7 +274,9 @@ upscaling. At 1920 px, each column is 320 px — exactly native resolution.
 | Alert rules loaded from `~/.gardepro/alerts.yaml` at startup | ✅ |
 | Keyword matching against subjects + description | ✅ |
 | `action: log` — writes to server log | ✅ |
-| `action: email` — Gmail SMTP (requires env vars in `/etc/gardepro.env`) | ✅ |
+| `action: email` — configurable SMTP (requires env vars in `/etc/gardepro.env`) | ✅ |
+| Email failures surfaced in UI log (no longer silently dropped) | ✅ |
+| "Send test" button in Alert Settings (visible when email configured) | ✅ |
 | Per-image dedup — never re-alert on the same photo | ✅ |
 | Per-rule cooldown — suppress repeat alerts within configurable window (default 30 min) | ✅ |
 | Per-rule enable/disable from Alert Settings UI | ✅ |
@@ -279,11 +288,15 @@ To enable email alerts:
 1. Set `action: email` on the desired rule in `~/.gardepro/alerts.yaml`
 2. Add to `/etc/gardepro.env`:
    ```
-   GARDEPRO_ALERT_EMAIL=you@gmail.com
-   GARDEPRO_ALERT_SMTP_PASSWORD=<gmail-app-password>
+   GARDEPRO_ALERT_EMAIL=you@example.com
+   GARDEPRO_ALERT_SMTP_HOST=smtp.postmarkapp.com
+   GARDEPRO_ALERT_SMTP_PORT=587
+   GARDEPRO_ALERT_SMTP_USER=<server-api-token>
+   GARDEPRO_ALERT_SMTP_PASSWORD=<server-api-token>
    ```
-   Gmail App Password: myaccount.google.com → Security → App passwords
-3. `sudo systemctl restart gardepro`
+   For Gmail: omit `SMTP_HOST`/`SMTP_PORT` (defaults apply), set `SMTP_USER` to the sending address and `SMTP_PASSWORD` to an App Password (myaccount.google.com → Security → App passwords).
+3. Use the **Send test** button in Settings → Alert Settings to verify before relying on live alerts.
+4. `sudo systemctl restart gardepro`
 
 Email format — Subject: `GardePro alert: raccoon detected`; Body: plain text with
 detection name, image URL (`http://pi:8080/api/file/{id}/{kind}`), and analysis description.

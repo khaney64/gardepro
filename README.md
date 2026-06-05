@@ -60,7 +60,7 @@ GARDEPRO_WIFI_PASSWORD=<password> python3 -m uvicorn server:app --host 0.0.0.0 -
 - Offline gallery — cached thumbnails/media remain browsable when disconnected; "Last synced" warns (⚠ orange) if stale beyond 10 minutes
 - Auto-sync — background BLE wake + WiFi connect + thumbnail cache every 10 minutes (`GARDEPRO_AUTO_CONNECT=1`)
 - LLM image analysis — thumbnails sent to local llama.cpp or Anthropic Claude for animal/person detection; results shown as subject badges and colored borders on thumbnails, description in lightbox
-- Alert rules — keyword-based rules in `~/.gardepro/alerts.yaml`; actions: log or email (Gmail SMTP); per-rule enable/disable and cooldown configurable from the Settings UI
+- Alert rules — keyword-based rules in `~/.gardepro/alerts.yaml`; actions: log or email (configurable SMTP — Gmail, Postmark, etc.); per-rule enable/disable and cooldown in Settings UI; "Send test" button to verify email config; failures surfaced in Logs tab
 
 **Files:**
 - `web/server.py` — FastAPI backend: BLE wake, WiFi connect, media proxy, HLS streaming, auto-sync, in-memory log buffer, saved-media endpoints

@@ -18,8 +18,12 @@ Environment variables:
   GARDEPRO_LLM_URL                Base URL of llama.cpp OpenAI API (default: http://devbox.lan:8080)
   GARDEPRO_LLM_MODEL              Model name for vision analysis (required for analysis)
   GARDEPRO_ALERT_EMAIL            Recipient address for email alerts
-  GARDEPRO_ALERT_SMTP_USER        Gmail sender address (defaults to GARDEPRO_ALERT_EMAIL)
-  GARDEPRO_ALERT_SMTP_PASSWORD    Gmail app password
+  GARDEPRO_ALERT_FROM_EMAIL       Sender address (defaults to GARDEPRO_ALERT_EMAIL)
+  GARDEPRO_ALERT_SMTP_HOST        SMTP server hostname (default: smtp.gmail.com)
+  GARDEPRO_ALERT_SMTP_PORT        SMTP server port (default: 587)
+  GARDEPRO_ALERT_SMTP_SSL         Set to 1 for implicit SSL; auto-detected when port is 465
+  GARDEPRO_ALERT_SMTP_USER        SMTP auth username (defaults to GARDEPRO_ALERT_FROM_EMAIL; use API token for Postmark)
+  GARDEPRO_ALERT_SMTP_PASSWORD    SMTP password or app password
 """
 
 import asyncio
@@ -411,11 +415,13 @@ async def _analysis_loop():
         if _alert_rules and subjects and _analysis_config.get("alerts_enabled", False):
             rules = _enabled_alert_rules()
             cooldown = float(_analysis_config.get("alert_cooldown_minutes", 30)) * 60
-            triggered = await asyncio.to_thread(
+            triggered, alert_errors = await asyncio.to_thread(
                 alerter.check_and_alert, result, id_, kind, rules, pi_host, cooldown
             )
             if triggered:
                 await _log(f"Analysis: alert triggered — {', '.join(triggered)} (media {id_}/{kind})")
+            for err in alert_errors:
+                await _log(f"Analysis: {err}")
     await _log("Analysis: done")
 
 
@@ -936,6 +942,18 @@ async def api_analysis_config_set(body: dict):
     }
 
 
+@app.post("/api/alert/test-email")
+async def api_alert_test_email():
+    """Send a test email to verify alert email configuration."""
+    try:
+        await asyncio.to_thread(alerter.send_test_email)
+        await _log("Alert: test email sent successfully")
+        return {"success": True}
+    except Exception as exc:
+        await _log(f"Alert: test email failed — {exc}")
+        raise HTTPException(500, str(exc))
+
+
 @app.post("/api/analysis/run/saved/{saved_id}")
 async def api_analysis_run_saved(saved_id: int):
     """Force re-analyze a saved media item using current config."""
@@ -988,11 +1006,13 @@ async def api_analysis_run(media_id: int, kind: str):
         pi_host = f"{_get_pi_ip()}:8080"
         rules = _enabled_alert_rules()
         cooldown = float(_analysis_config.get("alert_cooldown_minutes", 30)) * 60
-        triggered = await asyncio.to_thread(
+        triggered, alert_errors = await asyncio.to_thread(
             alerter.check_and_alert, result, media_id, kind_lower, rules, pi_host, cooldown
         )
         if triggered:
             await _log(f"Analysis: alert triggered — {', '.join(triggered)} (media {media_id}/{kind_lower})")
+        for err in alert_errors:
+            await _log(f"Analysis: {err}")
     return {"id": media_id, "kind": kind_lower, **result}
 
 
@@ -1003,7 +1023,7 @@ async def api_thumb(media_id: int, kind: str):
     if cached.exists():
         return FileResponse(
             str(cached), media_type="image/jpeg",
-            headers={"Cache-Control": "public, max-age=86400"},
+            headers={"Cache-Control": "no-cache"},
         )
     if _state["status"] != "connected":
         raise HTTPException(503, "Not connected and no cached thumbnail")
@@ -1085,6 +1105,8 @@ async def api_delete(media_id: int, kind: str):
                          if not (m["id"] == media_id and m["kind"] == kind.lower())]
             _state["media_count"] = len(_media)
             await asyncio.to_thread(_db.delete_media, media_id, kind.lower())
+            cached_thumb = THUMB_DIR / f"{media_id}_{kind.lower()}.jpg"
+            await asyncio.to_thread(cached_thumb.unlink, True)
             await _broadcast({**_broadcast_state(), "type": "media_deleted",
                               "id": media_id, "kind": kind.lower()})
             return {"success": True}

@@ -776,12 +776,15 @@ async function loadAnalysisConfig() {
 
     // Email status
     const emailEl = el('alert-email-status');
+    const testBtn = el('test-email-btn');
     if (d.alert_email) {
       emailEl.textContent = `✓ ${d.alert_email}`;
       emailEl.style.color = 'var(--green, #22c55e)';
+      testBtn.classList.remove('hidden');
     } else {
       emailEl.textContent = 'Not configured — set GARDEPRO_ALERT_EMAIL in /etc/gardepro.env';
       emailEl.style.color = '';
+      testBtn.classList.add('hidden');
     }
 
     // Cooldown
@@ -854,6 +857,30 @@ async function saveAnalysisConfig() {
   } catch (e) {
     _setConfigStatus('Error: ' + e.message);
   }
+}
+
+async function testAlertEmail() {
+  const btn = el('test-email-btn');
+  const status = el('test-email-status');
+  btn.disabled = true;
+  status.textContent = 'Sending…';
+  status.style.color = '';
+  try {
+    const r = await fetch('/api/alert/test-email', { method: 'POST' });
+    if (r.ok) {
+      status.textContent = '✓ Sent — check your inbox';
+      status.style.color = 'var(--green, #22c55e)';
+    } else {
+      const d = await r.json().catch(() => ({}));
+      status.textContent = 'Failed: ' + (d.detail || r.status);
+      status.style.color = 'var(--red, #ef4444)';
+    }
+  } catch (e) {
+    status.textContent = 'Error: ' + e.message;
+    status.style.color = 'var(--red, #ef4444)';
+  }
+  btn.disabled = false;
+  setTimeout(() => { status.textContent = ''; }, 6000);
 }
 
 // ── Live streaming ─────────────────────────────────────────────────────────────

@@ -8,11 +8,15 @@ from pathlib import Path
 
 import yaml
 
-_SMTP_HOST = "smtp.gmail.com"
-_SMTP_PORT = 587
+_SMTP_HOST = os.environ.get("GARDEPRO_ALERT_SMTP_HOST", "smtp.gmail.com").strip()
+_SMTP_PORT = int(os.environ.get("GARDEPRO_ALERT_SMTP_PORT", "587"))
+# Use implicit SSL (SMTP_SSL) when port is 465 or GARDEPRO_ALERT_SMTP_SSL=1; otherwise STARTTLS
+_smtp_ssl_env = os.environ.get("GARDEPRO_ALERT_SMTP_SSL", "").strip()
+_SMTP_SSL  = (_smtp_ssl_env == "1") if _smtp_ssl_env else (_SMTP_PORT == 465)
 
 _ALERT_EMAIL   = os.environ.get("GARDEPRO_ALERT_EMAIL", "").strip()
-_SMTP_USER     = os.environ.get("GARDEPRO_ALERT_SMTP_USER", _ALERT_EMAIL).strip()
+_ALERT_FROM    = os.environ.get("GARDEPRO_ALERT_FROM_EMAIL", _ALERT_EMAIL).strip()
+_SMTP_USER     = os.environ.get("GARDEPRO_ALERT_SMTP_USER", _ALERT_FROM).strip()
 _SMTP_PASSWORD = os.environ.get("GARDEPRO_ALERT_SMTP_PASSWORD", "").strip()
 
 _fired: set[tuple] = set()          # (media_id, kind, rule_name) — never re-alert same image
@@ -33,19 +37,34 @@ def load_rules(path: str) -> list[dict]:
 
 
 def _send_email(subject: str, body: str) -> None:
-    if not (_ALERT_EMAIL and _SMTP_PASSWORD):
-        logging.warning("GardePro alert: email not sent — GARDEPRO_ALERT_EMAIL or GARDEPRO_ALERT_SMTP_PASSWORD not set")
-        return
+    """Send an email alert. Raises on misconfiguration or SMTP failure."""
+    if not _ALERT_EMAIL:
+        raise RuntimeError("GARDEPRO_ALERT_EMAIL not set")
+    if not _SMTP_PASSWORD:
+        raise RuntimeError("GARDEPRO_ALERT_SMTP_PASSWORD not set")
     msg = EmailMessage()
-    msg["From"]    = _SMTP_USER or _ALERT_EMAIL
+    msg["From"]    = _ALERT_FROM
     msg["To"]      = _ALERT_EMAIL
     msg["Subject"] = subject
     msg.set_content(body)
-    with smtplib.SMTP(_SMTP_HOST, _SMTP_PORT, timeout=15) as s:
-        s.ehlo()
-        s.starttls()
-        s.login(_SMTP_USER or _ALERT_EMAIL, _SMTP_PASSWORD)
-        s.send_message(msg)
+    if _SMTP_SSL:
+        with smtplib.SMTP_SSL(_SMTP_HOST, _SMTP_PORT, timeout=15) as s:
+            s.login(_SMTP_USER, _SMTP_PASSWORD)
+            s.send_message(msg)
+    else:
+        with smtplib.SMTP(_SMTP_HOST, _SMTP_PORT, timeout=15) as s:
+            s.ehlo()
+            s.starttls()
+            s.login(_SMTP_USER, _SMTP_PASSWORD)
+            s.send_message(msg)
+
+
+def send_test_email() -> None:
+    """Send a test email to verify configuration. Raises on failure."""
+    _send_email(
+        "GardePro test alert",
+        "This is a test message from GardePro.\n\nIf you received this, email alerts are working correctly.",
+    )
 
 
 def check_and_alert(
@@ -55,14 +74,15 @@ def check_and_alert(
     rules: list[dict],
     pi_host: str = "localhost:8080",
     cooldown_seconds: float = 1800,
-) -> list[str]:
-    """Match analysis against rules; fire alerts. Returns list of triggered rule names."""
+) -> tuple[list[str], list[str]]:
+    """Match analysis against rules; fire alerts. Returns (triggered rule names, error messages)."""
     if not rules:
         return []
 
     subjects    = [s.lower() for s in (analysis.get("subjects") or [])]
     description = (analysis.get("description") or "").lower()
     triggered   = []
+    errors      = []
     now         = time.time()
 
     for rule in rules:
@@ -104,8 +124,10 @@ def check_and_alert(
                 _send_email(subj, body)
                 logging.info("GardePro alert [%s]: email sent for media %s/%s", name, media_id, kind)
             except Exception as exc:
-                logging.warning("GardePro alert [%s]: email failed — %s", name, exc)
+                err = f"Alert [{name}]: email failed — {exc}"
+                logging.warning("GardePro %s", err)
+                errors.append(err)
         else:
             logging.info("GardePro alert [%s]: media %s/%s — %s", name, media_id, kind, image_url)
 
-    return triggered
+    return triggered, errors

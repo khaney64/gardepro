@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="theme-color" content="#1a1a2e">
   <title>GardePro</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=5">
 </head>
 <body>
 
@@ -201,7 +201,11 @@
             </div>
             <div class="form-row">
               <label>Email</label>
-              <span id="alert-email-status" class="muted"></span>
+              <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                <span id="alert-email-status" class="muted"></span>
+                <button id="test-email-btn" class="btn btn-sm hidden" onclick="testAlertEmail()">Send test</button>
+                <span id="test-email-status" class="muted"></span>
+              </div>
             </div>
             <div class="form-row">
               <label>Cooldown</label>
@@ -306,6 +310,6 @@
 
   <!-- HLS.js from CDN (loaded only when needed) -->
   <script src="https://cdn.jsdelivr.net/npm/hls.js@latest/dist/hls.min.js"></script>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=5"></script>
 </body>
 </html>
