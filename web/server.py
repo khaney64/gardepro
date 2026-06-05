@@ -37,6 +37,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -76,7 +77,12 @@ RTSP_PORT_LOCAL     = int(os.environ.get("GARDEPRO_RTSP_PORT", "8554"))
 HLS_TMP_DIR         = Path("/tmp/gardepro_hls")
 STATIC_DIR          = Path(__file__).parent / "static"
 AUTO_CONNECT        = os.environ.get("GARDEPRO_AUTO_CONNECT", "").strip() in ("1", "true", "yes")
-SYNC_INTERVAL       = int(os.environ.get("GARDEPRO_SYNC_INTERVAL", "600"))
+SYNC_INTERVAL          = int(os.environ.get("GARDEPRO_SYNC_INTERVAL", "600"))
+DHCP_TIMEOUT           = 30   # seconds — all observed successes in 6–13s; was hardcoded 90
+AUTO_SYNC_RETRIES      = 2    # extra attempts after first failure
+AUTO_SYNC_RETRY_DELAY  = 30   # seconds between retry attempts
+HTTP_VERIFY_RETRIES    = 3    # camera HTTP may not be ready instantly after DHCP
+HTTP_VERIFY_RETRY_WAIT = 3    # seconds between HTTP verify retries
 
 # ── Shared camera session ─────────────────────────────────────────────────────
 
@@ -107,8 +113,9 @@ _media: list[dict] = []
 _sse_queues:        list[asyncio.Queue] = []
 _log_entries:       collections.deque = collections.deque(maxlen=200)
 _connect_task:      Optional[asyncio.Task] = None
-_background_tasks:  list[asyncio.Task] = []
-_thumb_cache_task:  Optional[asyncio.Task] = None
+_background_tasks:    list[asyncio.Task] = []
+_thumb_cache_task:    Optional[asyncio.Task] = None
+_chain_analysis_task: Optional[asyncio.Task] = None
 _rtsp_server       = None
 _hls_proc          = None
 _shutting_down      = False
@@ -370,8 +377,10 @@ async def _thumb_cache_loop():
             if resp.status_code == 200:
                 await asyncio.to_thread(dest.write_bytes, resp.content)
                 await asyncio.to_thread(_db.mark_thumb_cached, id_, kind, str(dest))
-        except Exception:
-            pass
+            else:
+                await _log(f"Thumb {id_}/{kind}: camera returned {resp.status_code}")
+        except Exception as exc:
+            await _log(f"Thumb {id_}/{kind}: download failed — {exc}")
         if (i + 1) % 10 == 0 or i + 1 == total:
             await _broadcast({"type": "cache_progress",
                               "cached": i + 1, "total": total})
@@ -434,7 +443,20 @@ async def _auto_sync_loop():
     """
     await asyncio.sleep(10)  # let uvicorn fully start
     while not _shutting_down:
-        await asyncio.sleep(SYNC_INTERVAL)
+        # Sleep only for the time remaining since the last successful sync so that
+        # a restart mid-interval doesn't reset the full wait.
+        last = _db.get_last_synced()
+        if last:
+            try:
+                last_dt = datetime.datetime.fromisoformat(last.replace("Z", "+00:00"))
+                elapsed = (datetime.datetime.now(datetime.timezone.utc) - last_dt).total_seconds()
+                wait = max(0.0, SYNC_INTERVAL - elapsed)
+            except Exception:
+                wait = float(SYNC_INTERVAL)
+        else:
+            wait = 0.0  # never synced — run immediately after startup
+        if wait > 0:
+            await asyncio.sleep(wait)
         if _shutting_down:
             break
         if _state["status"] == "connected":
@@ -442,22 +464,36 @@ async def _auto_sync_loop():
             await _sync_cache()
             await _log("Auto-sync: done")
         elif _state["status"] == "disconnected":
-            await _log("Auto-sync: starting background connection…")
-            try:
-                await _connection_flow()
-                if _state["status"] == "connected":
-                    if _thumb_cache_task and not _thumb_cache_task.done():
-                        try:
-                            await _thumb_cache_task
-                        except Exception:
-                            pass
-                    await _analysis_loop()
-                    await _disconnect_flow()
-                    await _log("Auto-sync: completed successfully")
-                else:
-                    await _log("Auto-sync: connection failed (see error above)")
-            except Exception as exc:
-                await _log(f"Auto-sync: exception — {exc}")
+            for _attempt in range(1, AUTO_SYNC_RETRIES + 2):
+                await _log(f"Auto-sync: connecting (attempt {_attempt}/{AUTO_SYNC_RETRIES + 1})…")
+                try:
+                    await _connection_flow()
+                    if _state["status"] == "connected":
+                        # Cancel before any await — chain_analysis hasn't started yet,
+                        # so this prevents it from running _analysis_loop a second time.
+                        if _chain_analysis_task and not _chain_analysis_task.done():
+                            _chain_analysis_task.cancel()
+                        if _thumb_cache_task and not _thumb_cache_task.done():
+                            try:
+                                await _thumb_cache_task
+                            except Exception:
+                                pass
+                        await _analysis_loop()
+                        await _disconnect_flow()
+                        await _log("Auto-sync: completed successfully")
+                        break
+                    else:
+                        if _attempt <= AUTO_SYNC_RETRIES:
+                            await _log(f"Auto-sync: attempt {_attempt} failed — retrying in {AUTO_SYNC_RETRY_DELAY}s")
+                            await asyncio.sleep(AUTO_SYNC_RETRY_DELAY)
+                        else:
+                            await _log(f"Auto-sync: all {AUTO_SYNC_RETRIES + 1} attempts failed")
+                except Exception as exc:
+                    if _attempt <= AUTO_SYNC_RETRIES:
+                        await _log(f"Auto-sync: attempt {_attempt} exception — {exc}; retrying in {AUTO_SYNC_RETRY_DELAY}s")
+                        await asyncio.sleep(AUTO_SYNC_RETRY_DELAY)
+                    else:
+                        await _log(f"Auto-sync: all attempts failed — {exc}")
 
 
 # ── Connection flow ───────────────────────────────────────────────────────────
@@ -509,35 +545,45 @@ async def _connection_flow():
             raise RuntimeError(f"Hotspot {ssid!r} did not appear within 60 s.")
 
         await _set_step(f"Connecting {iface} to {ssid}…")
+        _t0 = time.monotonic()
         ok = await asyncio.to_thread(linux_connect_wifi, ssid, password, iface)
         if not ok:
             raise RuntimeError("WiFi connection failed — check password.")
+        await _log(f"WiFi associated in {time.monotonic() - _t0:.1f}s")
 
         await _set_step("Waiting for DHCP…")
-        my_ip, _ = await asyncio.to_thread(linux_wait_for_ip, iface, 90)
+        _t0 = time.monotonic()
+        my_ip, _ = await asyncio.to_thread(linux_wait_for_ip, iface, DHCP_TIMEOUT)
         if not my_ip:
             raise RuntimeError("DHCP timed out — camera may need more time. Try again.")
+        await _log(f"DHCP acquired {my_ip} in {time.monotonic() - _t0:.1f}s")
 
         _state["camera_ip"] = CAMERA_IP
         _state["my_ip"] = my_ip
 
         await _set_step("Verifying camera HTTP…")
-        try:
-            probe = await asyncio.to_thread(
-                lambda: _cam_session.get(
-                    f"http://{CAMERA_IP}:{CAMERA_PORT}/cmd/getSetting", timeout=5
+        for _attempt in range(HTTP_VERIFY_RETRIES):
+            try:
+                probe = await asyncio.to_thread(
+                    lambda: _cam_session.get(
+                        f"http://{CAMERA_IP}:{CAMERA_PORT}/cmd/getSetting", timeout=5
+                    )
                 )
-            )
-            if probe.status_code >= 500:
-                raise RuntimeError(
-                    f"Camera returned HTTP {probe.status_code} — WiFi session may have expired."
-                )
-        except requests.exceptions.ConnectionError:
-            raise RuntimeError(
-                "Camera not responding at 192.168.8.1:8080 — session may have timed out. Try again."
-            )
-        except requests.exceptions.Timeout:
-            raise RuntimeError("Camera HTTP timed out. Try disconnecting and reconnecting.")
+                if probe.status_code >= 500:
+                    raise RuntimeError(
+                        f"Camera returned HTTP {probe.status_code} — WiFi session may have expired."
+                    )
+                break  # success
+            except requests.exceptions.ConnectionError:
+                if _attempt < HTTP_VERIFY_RETRIES - 1:
+                    await _log(f"Camera HTTP not ready yet, retrying in {HTTP_VERIFY_RETRY_WAIT}s…")
+                    await asyncio.sleep(HTTP_VERIFY_RETRY_WAIT)
+                else:
+                    raise RuntimeError(
+                        "Camera not responding at 192.168.8.1:8080 — session may have timed out. Try again."
+                    )
+            except requests.exceptions.Timeout:
+                raise RuntimeError("Camera HTTP timed out. Try disconnecting and reconnecting.")
 
         await _set_step("Scanning media library…")
         await _enumerate_media()
@@ -547,7 +593,7 @@ async def _connection_flow():
         await _start_rtsp_proxy()
         await _broadcast(_broadcast_state())
 
-        global _thumb_cache_task
+        global _thumb_cache_task, _chain_analysis_task
         _background_tasks.clear()
         _background_tasks.append(asyncio.create_task(_keepalive_loop()))
         _background_tasks.append(asyncio.create_task(_signal_poll_loop(iface)))
@@ -559,7 +605,8 @@ async def _connection_flow():
             except Exception:
                 pass
             await _analysis_loop()
-        _background_tasks.append(asyncio.create_task(_chain_analysis()))
+        _chain_analysis_task = asyncio.create_task(_chain_analysis())
+        _background_tasks.append(_chain_analysis_task)
 
     except asyncio.CancelledError:
         await _log("Connection cancelled")
