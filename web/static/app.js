@@ -51,6 +51,9 @@ function handleEvent(data) {
   if (data.type === 'log') {
     appendLog(data);
     appendConnectModalLog(data.msg);
+  } else if (data.type === 'alert_error') {
+    appendLog(data, true);
+    appendConnectModalLog(data.msg);
 
   } else if (data.type === 'state') {
     const wasConnected = S.status === 'connected';
@@ -1145,11 +1148,11 @@ function formatSavedAt(savedAt) {
 
 // ── Logs tab ──────────────────────────────────────────────────────────────────
 
-function appendLog(entry) {
+function appendLog(entry, isError) {
   const output = el('logs-output');
   if (!output) return;
   const line = document.createElement('div');
-  line.className = 'log-line';
+  line.className = isError || entry.level === 'error' ? 'log-line log-line--error' : 'log-line';
   const ts = document.createElement('span');
   ts.className = 'log-ts';
   ts.textContent = entry.ts;
