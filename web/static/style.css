@@ -243,6 +243,8 @@ header {
 .lb-delete:hover { background: rgba(192,57,43,.9); }
 .lb-reanalyze { background: rgba(50,90,180,.6); }
 .lb-reanalyze:hover { background: rgba(50,90,180,.9); }
+.lb-chat { background: rgba(90,60,160,.6); }
+.lb-chat:hover { background: rgba(90,60,160,.9); }
 .saved-date-label {
   position: absolute; bottom: 0; left: 0; right: 0;
   background: rgba(0,0,0,.55); color: #fff;
@@ -466,6 +468,39 @@ header {
 .connect-modal-footer {
   padding: 12px 16px; border-top: 1px solid var(--border);
   display: flex; gap: 8px; justify-content: flex-end;
+}
+
+/* ── Chat dialog ── */
+.chat-dialog {
+  position: fixed; inset: 0; z-index: 1100;
+  background: rgba(0,0,0,.6);
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+}
+.chat-dialog.hidden { display: none; }
+.chat-dialog-card {
+  background: var(--surface); border-radius: 16px;
+  max-width: 520px; width: 100%;
+  box-shadow: 0 8px 32px rgba(0,0,0,.35);
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.chat-dialog-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 20px 14px; border-bottom: 1px solid var(--border);
+}
+.chat-dialog-header h3 { font-size: 1em; font-weight: 600; margin: 0; }
+.chat-close-btn {
+  color: var(--text-muted); font-size: 1.1em;
+  padding: 4px 8px; border-radius: 6px;
+}
+.chat-close-btn:hover { background: var(--bg); color: var(--text); }
+.chat-dialog-body { padding: 16px 20px; display: flex; flex-direction: column; gap: 10px; }
+.chat-prompt-input { width: 100%; box-sizing: border-box; resize: vertical; }
+.chat-dialog-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+.chat-response {
+  background: #f8f9fa; border: 1px solid var(--border); border-radius: 8px;
+  padding: 12px 14px; font-size: .88em; white-space: pre-wrap;
+  max-height: 300px; overflow-y: auto; line-height: 1.5;
 }
 
 /* ── Logs tab ── */

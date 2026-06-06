@@ -13,6 +13,7 @@ _CONFIG_PATH = Path.home() / ".gardepro" / "analysis_config.json"
 _DEFAULTS = {
     "analyze_enabled": True,
     "alerts_enabled": False,
+    "chat_enabled": False,
     "backend": "llm",
     "llm_url": os.environ.get("GARDEPRO_LLM_URL", "http://devbox.lan:8080").rstrip("/"),
     "llm_model": os.environ.get("GARDEPRO_LLM_MODEL", "").strip(),
@@ -22,6 +23,7 @@ _DEFAULTS = {
         "Be concise — just name what you observe, one item per line."
     ),
     "max_tokens": 800,
+    "thinking_budget": 2048,
     "temperature": 0.1,
     "alert_cooldown_minutes": 30,
     "alert_rules_enabled": {},  # {} = all rules enabled; {"person": False} to disable specific rules
@@ -73,6 +75,7 @@ def _call_local(thumb_path: str, cfg: dict) -> dict:
     url = cfg["llm_url"].rstrip("/")
     data = Path(thumb_path).read_bytes()
     b64  = base64.b64encode(data).decode()
+    thinking_budget = int(cfg.get("thinking_budget", 0))
     payload = {
         "model": cfg["llm_model"],
         "messages": [
@@ -85,9 +88,14 @@ def _call_local(thumb_path: str, cfg: dict) -> dict:
                 ],
             }
         ],
-        "max_tokens": int(cfg["max_tokens"]),
+        "max_tokens": int(cfg["max_tokens"]) + thinking_budget,
         "temperature": float(cfg["temperature"]),
     }
+    if thinking_budget > 0:
+        payload["chat_template_kwargs"] = {
+            "enable_thinking": True,
+            "thinking_budget": thinking_budget,
+        }
     resp = _session.post(f"{url}/v1/chat/completions", json=payload, timeout=(5, 90))
     resp.raise_for_status()
     text = resp.json()["choices"][0]["message"]["content"]
@@ -100,9 +108,10 @@ def _call_anthropic(thumb_path: str, cfg: dict) -> dict:
         raise RuntimeError("ANTHROPIC_API_KEY not set")
     data = Path(thumb_path).read_bytes()
     b64  = base64.b64encode(data).decode()
+    thinking_budget = int(cfg.get("thinking_budget", 0))
     payload = {
         "model": cfg["anthropic_model"],
-        "max_tokens": int(cfg["max_tokens"]),
+        "max_tokens": int(cfg["max_tokens"]) + thinking_budget,
         "messages": [
             {
                 "role": "user",
@@ -117,6 +126,8 @@ def _call_anthropic(thumb_path: str, cfg: dict) -> dict:
             }
         ],
     }
+    if thinking_budget > 0:
+        payload["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
     resp = _session.post(
         "https://api.anthropic.com/v1/messages",
         json=payload,
@@ -128,7 +139,9 @@ def _call_anthropic(thumb_path: str, cfg: dict) -> dict:
         timeout=(5, 90),
     )
     resp.raise_for_status()
-    text = resp.json()["content"][0]["text"]
+    # With thinking enabled the content array may start with a thinking block; find the text block.
+    content_blocks = resp.json()["content"]
+    text = next((b["text"] for b in content_blocks if b.get("type") == "text"), "")
     return {"subjects": _parse_subjects(text), "description": text.strip(), "engine": f"Anthropic ({cfg['anthropic_model']})"}
 
 
@@ -136,6 +149,68 @@ def _call(thumb_path: str, cfg: dict) -> dict:
     if cfg.get("backend") == "anthropic":
         return _call_anthropic(thumb_path, cfg)
     return _call_local(thumb_path, cfg)
+
+
+def _call_raw(thumb_path: str, cfg: dict) -> dict:
+    """Like _call() but returns only raw text — no subject parsing (for chat)."""
+    data = Path(thumb_path).read_bytes()
+    b64  = base64.b64encode(data).decode()
+    thinking_budget = int(cfg.get("thinking_budget", 0))
+    if cfg.get("backend") == "anthropic":
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        payload = {
+            "model": cfg["anthropic_model"],
+            "max_tokens": int(cfg["max_tokens"]) + thinking_budget,
+            "messages": [{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+                {"type": "text", "text": cfg["prompt"]},
+            ]}],
+        }
+        if thinking_budget > 0:
+            payload["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
+        resp = _session.post(
+            "https://api.anthropic.com/v1/messages", json=payload,
+            headers={"x-api-key": api_key, "anthropic-version": "2023-06-01",
+                     "content-type": "application/json"},
+            timeout=(5, 90),
+        )
+        resp.raise_for_status()
+        content_blocks = resp.json()["content"]
+        text = next((b["text"] for b in content_blocks if b.get("type") == "text"), "")
+        return {"description": text.strip()}
+    else:
+        url = cfg["llm_url"].rstrip("/")
+        payload = {
+            "model": cfg["llm_model"],
+            "messages": [{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                {"type": "text", "text": cfg["prompt"]},
+            ]}],
+            "max_tokens": int(cfg["max_tokens"]) + thinking_budget,
+            "temperature": float(cfg["temperature"]),
+        }
+        if thinking_budget > 0:
+            payload["chat_template_kwargs"] = {
+                "enable_thinking": True,
+                "thinking_budget": thinking_budget,
+            }
+        resp = _session.post(f"{url}/v1/chat/completions", json=payload, timeout=(5, 90))
+        resp.raise_for_status()
+        return {"description": resp.json()["choices"][0]["message"]["content"].strip()}
+
+
+async def chat_image(thumb_path: str, prompt: str, config: Optional[dict] = None) -> dict:
+    """One-shot image chat with a custom prompt. Returns raw text only. Never raises."""
+    cfg = {**(config if config is not None else _load_config()), "prompt": prompt}
+    backend = cfg.get("backend", "llm")
+    if backend == "llm" and not (cfg.get("llm_url") and cfg.get("llm_model")):
+        return {"description": "", "error": "LLM URL or model not configured"}
+    if backend == "anthropic" and not os.environ.get("ANTHROPIC_API_KEY"):
+        return {"description": "", "error": "ANTHROPIC_API_KEY not set"}
+    try:
+        return await asyncio.to_thread(_call_raw, thumb_path, cfg)
+    except Exception as exc:
+        return {"description": "", "error": str(exc)}
 
 
 async def analyze_image(thumb_path: str, config: Optional[dict] = None) -> dict:

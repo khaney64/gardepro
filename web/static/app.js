@@ -29,6 +29,7 @@ const S = {
 
   // Analysis: Map of "id:kind" → {subjects, description}
   analysis: {},
+  chatEnabled: false,
 };
 
 let evtSource = null;
@@ -571,6 +572,15 @@ function renderLightboxItem() {
     reBtn.disabled        = false;
   }
 
+  // Chat: shown only when chat is enabled in settings
+  const chatBtn = el('lb-chat-btn');
+  if (chatBtn) {
+    chatBtn.classList.toggle('hidden', !S.chatEnabled);
+    chatBtn.dataset.savedId = isLocal ? (item.saved_id || '') : '';
+    chatBtn.dataset.id      = isLocal ? (item.cam_id || '') : item.id;
+    chatBtn.dataset.kind    = item.kind;
+  }
+
   if (item.kind === 'jpg') {
     const img = document.createElement('img');
     img.alt = isLocal ? `Saved photo` : `Photo ${item.id}`;
@@ -722,6 +732,54 @@ async function lightboxReanalyze() {
   }
 }
 
+function lightboxChat() {
+  el('chat-prompt-input').value = el('analysis-prompt')?.value || '';
+  el('chat-response').classList.add('hidden');
+  el('chat-response').textContent = '';
+  el('chat-status').textContent = '';
+  el('chat-dialog').classList.remove('hidden');
+}
+
+function closeChatDialog() {
+  el('chat-dialog').classList.add('hidden');
+}
+
+async function submitChat() {
+  const prompt = el('chat-prompt-input').value.trim();
+  if (!prompt) return;
+  const btn    = el('lb-chat-btn');
+  const submit = el('chat-submit-btn');
+  const isLocal = S.lightboxSource === 'local';
+  const savedId = parseInt(btn.dataset.savedId, 10);
+  const id      = parseInt(btn.dataset.id, 10);
+  const kind    = btn.dataset.kind;
+  submit.disabled = true;
+  el('chat-status').textContent = 'Thinking…';
+  el('chat-response').classList.add('hidden');
+  try {
+    const url = isLocal
+      ? `/api/analysis/chat/saved/${savedId}`
+      : `/api/analysis/chat/${id}/${kind}`;
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt }),
+    });
+    const d = await r.json().catch(() => ({}));
+    el('chat-status').textContent = '';
+    el('chat-response').textContent = (!r.ok || d.error)
+      ? `Error: ${d.error || d.detail || r.status}`
+      : (d.response || '(no response)');
+    el('chat-response').classList.remove('hidden');
+  } catch (e) {
+    el('chat-status').textContent = '';
+    el('chat-response').textContent = `Error: ${e.message}`;
+    el('chat-response').classList.remove('hidden');
+  } finally {
+    submit.disabled = false;
+  }
+}
+
 async function lightboxSave() {
   const item = S.pageItems[S.lightboxIdx];
   if (!item) return;
@@ -773,10 +831,13 @@ async function loadAnalysisConfig() {
     el('analysis-anthropic-model').value = d.anthropic_model || '';
     el('analysis-key-status').textContent = d.anthropic_key_set ? '✓ API key set' : '✗ API key not set in /etc/gardepro.env';
     el('analysis-prompt').value      = d.prompt || '';
-    el('analysis-max-tokens').value  = d.max_tokens || 800;
+    el('analysis-max-tokens').value       = d.max_tokens || 800;
+    el('analysis-thinking-budget').value  = d.thinking_budget ?? 2048;
     const temp = parseFloat(d.temperature ?? 0.1);
     el('analysis-temperature').value = temp;
     el('analysis-temp-val').textContent = temp.toFixed(2);
+    S.chatEnabled = !!d.chat_enabled;
+    el('chat-enabled').checked = S.chatEnabled;
     toggleAnalysisBackend();
 
     // Email status
@@ -843,9 +904,11 @@ async function saveAnalysisConfig() {
       anthropic_model:        el('analysis-anthropic-model').value.trim(),
       prompt:                 el('analysis-prompt').value,
       max_tokens:             parseInt(el('analysis-max-tokens').value, 10),
+      thinking_budget:        parseInt(el('analysis-thinking-budget').value, 10) || 0,
       temperature:            parseFloat(el('analysis-temperature').value),
       alert_cooldown_minutes: parseInt(el('alert-cooldown-minutes').value, 10) || 0,
       alert_rules_enabled:    alertRulesEnabled,
+      chat_enabled:           el('chat-enabled').checked,
     };
     const r = await fetch('/api/analysis/config', {
       method: 'POST',
@@ -857,6 +920,7 @@ async function saveAnalysisConfig() {
       _setConfigStatus('Error: ' + (d.detail || r.status));
       return;
     }
+    S.chatEnabled = el('chat-enabled').checked;
     _setConfigStatus('✓ Saved');
     setTimeout(() => { _setConfigStatus(''); }, 2500);
   } catch (e) {

@@ -209,6 +209,8 @@ Files on disk:
 | Full files tee-cached to `~/.gardepro/files/` on first view | ✅ |
 | Full files served from local cache (works offline); 404 if neither cached nor connected | ✅ |
 | `_enumerate_media` upserts all items to DB and writes `last_synced` timestamp | ✅ |
+| Scan floor: scan continues past `MAX_MISSES` gap until beyond highest previously-known ID (handles on-camera deletion gaps > 10) | ✅ |
+| Reused ID detection: `upsert_media` resets all cache flags when `captured_at` differs (prevents stale thumb after on-camera delete + reshoot) | ✅ |
 | On disconnect: `_media` repopulated from DB (gallery persists offline) | ✅ |
 | Delete removes DB row + both thumbnail and full file from disk | ✅ |
 | `GARDEPRO_AUTO_CONNECT=1` enables periodic background sync loop | ✅ |
@@ -255,8 +257,14 @@ upscaling. At 1920 px, each column is 320 px — exactly native resolution.
 | Subject keyword extraction from LLM response | ✅ |
 | Store `analyzed` + `analysis_json` in `cache.db` (both `media` and `saved_media` tables) | ✅ |
 | SSE push `analysis_update` / `saved_analysis_update` to browser on completion | ✅ |
-| Re-analyze button in lightbox (force re-run on demand) | ✅ |
+| Re-analyze button in lightbox (🔬, force re-run on demand) | ✅ |
 | Analysis config persisted in `~/.gardepro/analysis_config.json` | ✅ |
+| Thinking budget — extended reasoning token budget sent per request; 0 = off | ✅ |
+| — Local LLM: `chat_template_kwargs: {enable_thinking, thinking_budget}` appended to payload | ✅ |
+| — Anthropic: `thinking: {type: enabled, budget_tokens}` block; response text extracted past thinking block | ✅ |
+| — `max_tokens` sent = `thinking_budget + max_tokens` (answer headroom) | ✅ |
+| One-shot image chat (`chat_image`) — custom prompt, raw text response, no subject parsing | ✅ |
+| Chat API endpoints: `POST /api/analysis/chat/{id}/{kind}` and `.../chat/saved/{id}` | ✅ |
 
 ### Analysis UI
 
@@ -265,7 +273,11 @@ upscaling. At 1920 px, each column is 320 px — exactly native resolution.
 | Subject badge on thumbnail cards (raccoon 🦝, cat 🐱, person 🚶, etc.) | ✅ |
 | Colored thumbnail border by category (red=wild, blue=person, green=pet, orange=other) | ✅ |
 | Analysis description text shown in lightbox | ✅ |
-| Analysis Settings section in Settings tab (backend, URL, model, prompt, tokens, temp) | ✅ |
+| Analysis Settings: backend, URL, model, prompt, max tokens, thinking budget, temperature | ✅ |
+| Chat toggle in Analysis Settings — enables 💬 button in lightbox | ✅ |
+| Chat dialog: prompt textarea pre-filled from settings; editable; Submit → response shown inline | ✅ |
+| Chat is one-shot per submit; no conversation history; response not stored | ✅ |
+| Multi-select / delete blocked when not connected (long-press guard + auto-exit on disconnect) | ✅ |
 
 ### Alerting (`web/alerter.py`)
 
@@ -280,6 +292,7 @@ upscaling. At 1920 px, each column is 320 px — exactly native resolution.
 | Per-image dedup — never re-alert on the same photo | ✅ |
 | Per-rule cooldown — suppress repeat alerts within configurable window (default 30 min) | ✅ |
 | Per-rule enable/disable from Alert Settings UI | ✅ |
+| Alert rule order in UI follows `alerts.yaml` order: Person → Cat → Raccoon → Wildlife → Other | ✅ |
 | Alert Settings section in Settings tab (send alerts toggle, email status, cooldown, per-rule toggles) | ✅ |
 
 ### Email setup

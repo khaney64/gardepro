@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="theme-color" content="#1a1a2e">
   <title>GardePro</title>
-  <link rel="stylesheet" href="/static/style.css?v=5">
+  <link rel="stylesheet" href="/static/style.css?v=8">
 </head>
 <body>
 
@@ -180,9 +180,17 @@
               <input id="analysis-max-tokens" type="number" min="100" max="4096" style="width:90px">
             </div>
             <div class="form-row">
+              <label>Thinking Budget&nbsp;<span class="muted hint">0 = off</span></label>
+              <input id="analysis-thinking-budget" type="number" min="0" max="32768" step="256" style="width:90px">
+            </div>
+            <div class="form-row">
               <label>Temperature&nbsp;<span id="analysis-temp-val" class="muted">0.1</span></label>
               <input id="analysis-temperature" type="range" min="0" max="1" step="0.05"
                      oninput="el('analysis-temp-val').textContent = parseFloat(this.value).toFixed(2)" style="flex:1">
+            </div>
+            <div class="form-row">
+              <label>Chat</label>
+              <label class="toggle"><input type="checkbox" id="chat-enabled"><span class="toggle-slider"></span></label>
             </div>
             <div class="form-row form-actions">
               <span id="analysis-save-status" class="muted"></span>
@@ -282,6 +290,7 @@
       <button class="lb-btn" onclick="closeLightbox()">✕</button>
       <span id="lb-counter" class="lb-counter"></span>
       <div class="lb-actions">
+        <button id="lb-chat-btn" class="lb-btn lb-chat hidden" onclick="lightboxChat()" title="Chat about image">💬</button>
         <button id="lb-reanalyze-btn" class="lb-btn lb-reanalyze hidden" onclick="lightboxReanalyze()" title="Re-analyze">🔬</button>
         <button id="lb-save-btn" class="lb-btn lb-save hidden" onclick="lightboxSave()">💾</button>
         <button id="lb-delete-btn" class="lb-btn lb-delete" onclick="lightboxDelete()">🗑</button>
@@ -290,6 +299,24 @@
     <div id="lightbox-content" class="lb-content"></div>
     <button class="lb-arrow lb-prev" onclick="lightboxPrev()">‹</button>
     <button class="lb-arrow lb-next" onclick="lightboxNext()">›</button>
+  </div>
+
+  <!-- ── Chat dialog ── -->
+  <div id="chat-dialog" class="chat-dialog hidden" onclick="closeChatDialog()">
+    <div class="chat-dialog-card" onclick="event.stopPropagation()">
+      <div class="chat-dialog-header">
+        <h3>Chat about image</h3>
+        <button class="chat-close-btn" onclick="closeChatDialog()">✕</button>
+      </div>
+      <div class="chat-dialog-body">
+        <textarea id="chat-prompt-input" class="chat-prompt-input" rows="4" placeholder="Enter your question about this image…"></textarea>
+        <div class="chat-dialog-actions">
+          <span id="chat-status" class="muted"></span>
+          <button id="chat-submit-btn" class="btn btn-primary" onclick="submitChat()">Ask</button>
+        </div>
+        <div id="chat-response" class="chat-response hidden"></div>
+      </div>
+    </div>
   </div>
 
   <!-- ── Connection progress modal ── -->
@@ -310,6 +337,6 @@
 
   <!-- HLS.js from CDN (loaded only when needed) -->
   <script src="https://cdn.jsdelivr.net/npm/hls.js@latest/dist/hls.min.js"></script>
-  <script src="/static/app.js?v=5"></script>
+  <script src="/static/app.js?v=8"></script>
 </body>
 </html>
