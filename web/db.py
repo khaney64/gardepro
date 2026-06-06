@@ -87,6 +87,22 @@ class CacheDB:
         return [dict(r) for r in rows]
 
     def upsert_media(self, id: int, kind: str, captured_at: Optional[str] = None):
+        # If the camera reports a timestamp that differs from the stored one, the
+        # camera has reused this ID for a new file (e.g. after on-camera deletion).
+        # Reset all cache flags so the new file gets re-downloaded and re-analyzed.
+        if captured_at is not None:
+            row = self._conn.execute(
+                "SELECT captured_at FROM media WHERE id=? AND kind=?", (id, kind)
+            ).fetchone()
+            if row and row["captured_at"] and row["captured_at"] != captured_at:
+                self._conn.execute(
+                    """UPDATE media
+                       SET captured_at=?, thumb_cached=0, thumb_path=NULL,
+                           file_cached=0, file_path=NULL, analyzed=0, analysis_json=NULL
+                       WHERE id=? AND kind=?""",
+                    (captured_at, id, kind),
+                )
+                return
         # New rows: use camera-provided timestamp or fall back to discovery time.
         # Existing rows: only update if camera provides a better (non-null) value.
         self._conn.execute(
@@ -102,6 +118,10 @@ class CacheDB:
             "SELECT MAX(captured_at) AS t FROM media"
         ).fetchone()
         return row["t"] if row else None
+
+    def get_max_media_id(self) -> Optional[int]:
+        row = self._conn.execute("SELECT MAX(id) AS m FROM media").fetchone()
+        return row["m"] if row else None
 
     def mark_thumb_cached(self, id: int, kind: str, path: str):
         self._conn.execute(

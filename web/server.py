@@ -312,11 +312,24 @@ async def _signal_poll_loop(iface: str):
 async def _enumerate_media() -> list[dict]:
     global _media
     results: list[dict] = []
-    misses = 0
     MAX_MISSES = 10
     media_id = 1
+    last_found_id = 0
 
-    while misses < MAX_MISSES:
+    # Use the highest ID already in the DB as a scan floor so that gaps caused
+    # by on-camera deletion (which can exceed MAX_MISSES) don't terminate the
+    # scan before we reach IDs that still exist beyond the gap.
+    db_max = await asyncio.to_thread(_db.get_max_media_id)
+
+    while True:
+        # Stop only when both conditions hold:
+        #   1. We've seen MAX_MISSES consecutive non-hits past the last found item
+        #   2. We're also past the DB floor (highest previously-known ID + buffer)
+        trailing_clear = (media_id - last_found_id) >= MAX_MISSES
+        past_db_floor  = (db_max is None) or (media_id > db_max + MAX_MISSES)
+        if trailing_clear and past_db_floor:
+            break
+
         # Probe /file/ (not /thumb/) — both /JPG and /MP4 suffixes return the
         # same underlying file; Content-Type tells us the actual type.
         url = f"http://{CAMERA_IP}:{CAMERA_PORT}/file/{media_id}/JPG"
@@ -339,7 +352,8 @@ async def _enumerate_media() -> list[dict]:
         except Exception:
             pass
 
-        misses = 0 if found else misses + 1
+        if found:
+            last_found_id = media_id
         media_id += 1
 
         # Push incremental progress every 6 items

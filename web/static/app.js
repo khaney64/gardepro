@@ -76,6 +76,7 @@ function handleEvent(data) {
       fetchMedia();
       fetchAnalysis();
     }
+    if (S.multiSelect && S.status !== 'connected') exitMultiSelect();
     updateUI();
 
   } else if (data.type === 'signal') {
@@ -410,7 +411,7 @@ function makeThumbCard(item, idx) {
   // Long-press → multi-select
   let timer = null;
   card.addEventListener('touchstart', () => {
-    timer = setTimeout(() => { enterMultiSelect(); toggleSelect(item, card); }, 500);
+    timer = setTimeout(() => { if (S.status === 'connected') { enterMultiSelect(); toggleSelect(item, card); } }, 500);
   }, { passive: true });
   card.addEventListener('touchend',  () => clearTimeout(timer));
   card.addEventListener('touchmove', () => clearTimeout(timer), { passive: true });
@@ -459,6 +460,7 @@ function scrollToTop() {
 // ── Multi-select ──────────────────────────────────────────────────────────────
 
 function enterMultiSelect() {
+  if (S.status !== 'connected') return;
   S.multiSelect = true;
   document.body.classList.add('multiselect-mode');
   show('select-all-btn', true);
