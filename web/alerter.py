@@ -81,6 +81,7 @@ def check_and_alert(
     pi_host: str = "localhost:8080",
     cooldown_seconds: float = 1800,
     thumb_path: str = "",
+    all_rules: list[dict] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Match analysis against rules; fire alerts. Returns (triggered rule names, error messages)."""
     if not rules:
@@ -99,10 +100,10 @@ def check_and_alert(
         if p.exists():
             thumb_bytes = p.read_bytes()
 
-    # Collect all keywords from specific (non-catch-all) rules so the catch-all
-    # knows which subjects are already covered.
+    # Build specific_keywords from ALL rules (including disabled ones) so that
+    # disabling a specific rule doesn't cause its subjects to leak into the catch-all.
     specific_keywords: set[str] = set()
-    for rule in rules:
+    for rule in (all_rules if all_rules is not None else rules):
         if not rule.get("catch_all"):
             specific_keywords.update(k.lower() for k in (rule.get("keywords") or []))
 

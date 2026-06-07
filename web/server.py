@@ -447,7 +447,8 @@ async def _analysis_loop():
             rules = _enabled_alert_rules()
             cooldown = float(_analysis_config.get("alert_cooldown_minutes", 30)) * 60
             triggered, alert_errors = await asyncio.to_thread(
-                alerter.check_and_alert, result, id_, kind, rules, pi_host, cooldown, thumb_path
+                alerter.check_and_alert, result, id_, kind, rules, pi_host, cooldown, thumb_path,
+                _alert_rules
             )
             if triggered:
                 await _log(f"Analysis: alert triggered — {', '.join(triggered)} (media {id_}/{kind})")
@@ -1104,7 +1105,8 @@ async def api_analysis_run(media_id: int, kind: str):
         rules = _enabled_alert_rules()
         cooldown = float(_analysis_config.get("alert_cooldown_minutes", 30)) * 60
         triggered, alert_errors = await asyncio.to_thread(
-            alerter.check_and_alert, result, media_id, kind_lower, rules, pi_host, cooldown, str(cached)
+            alerter.check_and_alert, result, media_id, kind_lower, rules, pi_host, cooldown, str(cached),
+            _alert_rules
         )
         if triggered:
             await _log(f"Analysis: alert triggered — {', '.join(triggered)} (media {media_id}/{kind_lower})")
