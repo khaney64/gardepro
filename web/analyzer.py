@@ -98,7 +98,7 @@ def _call_local(thumb_path: str, cfg: dict) -> dict:
         }
     resp = _session.post(f"{url}/v1/chat/completions", json=payload, timeout=(5, 90))
     resp.raise_for_status()
-    text = resp.json()["choices"][0]["message"]["content"]
+    text = resp.json()["choices"][0]["message"]["content"] or ""
     return {"subjects": _parse_subjects(text), "description": text.strip(), "engine": f"Local ({cfg['llm_model']})"}
 
 
@@ -196,7 +196,8 @@ def _call_raw(thumb_path: str, cfg: dict) -> dict:
             }
         resp = _session.post(f"{url}/v1/chat/completions", json=payload, timeout=(5, 90))
         resp.raise_for_status()
-        return {"description": resp.json()["choices"][0]["message"]["content"].strip()}
+        text = resp.json()["choices"][0]["message"]["content"] or ""
+        return {"description": text.strip()}
 
 
 async def chat_image(thumb_path: str, prompt: str, config: Optional[dict] = None) -> dict:
@@ -208,7 +209,11 @@ async def chat_image(thumb_path: str, prompt: str, config: Optional[dict] = None
     if backend == "anthropic" and not os.environ.get("ANTHROPIC_API_KEY"):
         return {"description": "", "error": "ANTHROPIC_API_KEY not set"}
     try:
-        return await asyncio.to_thread(_call_raw, thumb_path, cfg)
+        result = await asyncio.to_thread(_call_raw, thumb_path, cfg)
+        if not result.get("description") and int(cfg.get("thinking_budget", 0)) > 0:
+            retry_cfg = {**cfg, "thinking_budget": int(cfg["thinking_budget"]) * 2}
+            result = await asyncio.to_thread(_call_raw, thumb_path, retry_cfg)
+        return result
     except Exception as exc:
         return {"description": "", "error": str(exc)}
 
@@ -222,6 +227,10 @@ async def analyze_image(thumb_path: str, config: Optional[dict] = None) -> dict:
     if backend == "anthropic" and not os.environ.get("ANTHROPIC_API_KEY"):
         return {"subjects": [], "description": "", "error": "ANTHROPIC_API_KEY not set"}
     try:
-        return await asyncio.to_thread(_call, thumb_path, cfg)
+        result = await asyncio.to_thread(_call, thumb_path, cfg)
+        if not result.get("description") and int(cfg.get("thinking_budget", 0)) > 0:
+            retry_cfg = {**cfg, "thinking_budget": int(cfg["thinking_budget"]) * 2}
+            result = await asyncio.to_thread(_call, thumb_path, retry_cfg)
+        return result
     except Exception as exc:
         return {"subjects": [], "description": "", "error": str(exc)}
