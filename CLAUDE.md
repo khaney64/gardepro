@@ -49,6 +49,8 @@ Two backends selectable at runtime:
 
 Config persisted at `~/.gardepro/analysis_config.json`. Subject detection is keyword-matching over LLM text output (`_KEYWORDS` list).
 
+**Thinking budget retry:** When a model exhausts its thinking budget it can return a response with no text — the Anthropic path returns `""` via `next(..., "")` and the local path guards against a `None` content field with `or ""`. Both `analyze_image()` and `chat_image()` detect an empty `description` after a successful call and retry once with `thinking_budget * 2`. Retries are logged as WARNING/INFO via Python's `logging` module (visible in `journalctl`).
+
 ### Alert engine (`web/alerter.py`)
 Rules loaded from `~/.gardepro/alerts.yaml` at startup. Each rule has `name`, `keywords`, `action` (log|email), optional `catch_all: true`. Dedup: `_fired` set prevents re-alerting the same image; `_last_fired` dict enforces per-rule cooldown. Email sends inline thumbnail via CID attachment.
 
