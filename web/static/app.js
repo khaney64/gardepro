@@ -1271,5 +1271,7 @@ setInterval(() => { updateOfflineBar(); updateLastEvent(); }, 60000);
 
 // Load cached analysis data on startup so borders show even before connecting
 fetchAnalysis();
+// Load analysis config at startup so chatEnabled is set before opening lightbox
+loadAnalysisConfig();
 
 startSSE();
