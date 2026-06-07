@@ -72,8 +72,8 @@ function handleEvent(data) {
     if (!wasConnected && S.status === 'connected') {
       fetchMedia();
       fetchAnalysis();
-    } else if (wasDisconnected && S.status === 'disconnected' && S.mediaCount > 0 && S.media.length === 0) {
-      // Server restarted with cached media — load gallery immediately
+    } else if (wasDisconnected && S.mediaCount > 0 && S.media.length === 0) {
+      // Cached media available but not loaded — covers server restart and page load during connecting
       fetchMedia();
       fetchAnalysis();
     }
