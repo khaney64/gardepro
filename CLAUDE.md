@@ -40,6 +40,8 @@ FastAPI app with a single shared `_state` dict that drives all UI updates. Key p
 ### Cache layer (`web/db.py`)
 SQLite at `~/.gardepro/cache.db`. Three tables: `media` (camera index + analysis), `saved_media` (Pi-local copies), `meta` (last_synced timestamp). Schema migrates forward with `ALTER TABLE ... ADD COLUMN` try/except. The `upsert_media()` method detects ID reuse after on-camera deletion by comparing `captured_at` timestamps and resets all cache flags.
 
+**Offline delete / pending_delete flag:** The `media` table has a `pending_delete` column (default 0). When the user deletes an image while disconnected, `mark_for_deletion()` sets this flag; the item is hidden from all queries (`get_all_media`, `get_uncached_thumbs`, `get_unanalyzed_media` all filter `pending_delete=0`). On the next connection, `_flush_pending_deletions()` runs before `_enumerate_media()`, deletes each flagged item from the camera, then permanently removes it from the DB. If the camera is unreachable mid-flush the item stays flagged and retries next connect. `upsert_media()` never clears the flag, so a re-scan cannot resurrect a marked item.
+
 ### LLM analysis (`web/analyzer.py`)
 Two backends selectable at runtime:
 - **Local** (`backend: "llm"`): llama.cpp OpenAI-compatible API at `GARDEPRO_LLM_URL`; sends thinking via `chat_template_kwargs`

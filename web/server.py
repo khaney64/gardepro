@@ -309,6 +309,28 @@ async def _signal_poll_loop(iface: str):
 
 # ── Media enumeration ─────────────────────────────────────────────────────────
 
+async def _flush_pending_deletions():
+    rows = await asyncio.to_thread(_db.get_pending_deletions)
+    if not rows:
+        return
+    await _log(f"Flushing {len(rows)} pending deletion(s) to camera…")
+    for row in rows:
+        mid, kind = row["id"], row["kind"]
+        url = f"http://{CAMERA_IP}:{CAMERA_PORT}/cmd/delete/{mid}/{kind.upper()}"
+        try:
+            resp = await asyncio.to_thread(lambda u=url: _cam_session.get(u, timeout=5))
+            code = resp.json().get("code", -1)
+            if code != 0:
+                await _log(f"Camera returned code={code} deleting {kind.upper()} #{mid} (may already be gone)")
+        except Exception as exc:
+            await _log(f"Could not reach camera to delete {kind.upper()} #{mid}: {exc} — will retry next connect")
+            continue
+        # Got an HTTP response (success or already-deleted) — clean up permanently.
+        await asyncio.to_thread(_db.delete_media, mid, kind)
+        cached_thumb = THUMB_DIR / f"{mid}_{kind}.jpg"
+        await asyncio.to_thread(cached_thumb.unlink, True)
+
+
 async def _enumerate_media() -> list[dict]:
     global _media
     results: list[dict] = []
@@ -368,11 +390,16 @@ async def _enumerate_media() -> list[dict]:
     def _sync_to_db(items):
         for item in items:
             _db.upsert_media(item["id"], item["kind"], item.get("captured_at"))
+        pending_ids = {(r["id"], r["kind"]) for r in _db.get_pending_deletions()}
         _db.set_last_synced()
         _state["last_synced"] = _db.get_last_synced()
         _state["last_event"]  = _db.get_last_event_time()
+        return pending_ids
 
-    await asyncio.to_thread(_sync_to_db, results)
+    pending_ids = await asyncio.to_thread(_sync_to_db, results)
+    if pending_ids:
+        _media[:] = [m for m in _media if (m["id"], m["kind"]) not in pending_ids]
+        _state["media_count"] = len(_media)
     return results
 
 
@@ -609,6 +636,7 @@ async def _connection_flow():
                 raise RuntimeError("Camera HTTP timed out. Try disconnecting and reconnecting.")
 
         await _set_step("Scanning media library…")
+        await _flush_pending_deletions()
         await _enumerate_media()
 
         _state["status"] = "connected"
@@ -1194,21 +1222,29 @@ async def api_file(media_id: int, kind: str):
 
 @app.delete("/api/file/{media_id}/{kind}")
 async def api_delete(media_id: int, kind: str):
+    kind_lower = kind.lower()
     if _state["status"] != "connected":
-        raise HTTPException(503, "Not connected")
+        # Offline: mark for deletion; will be flushed to camera on next connect.
+        await asyncio.to_thread(_db.mark_for_deletion, media_id, kind_lower)
+        _media[:] = [m for m in _media
+                     if not (m["id"] == media_id and m["kind"] == kind_lower)]
+        _state["media_count"] = len(_media)
+        await _broadcast({**_broadcast_state(), "type": "media_deleted",
+                          "id": media_id, "kind": kind_lower})
+        return {"success": True}
     url = f"http://{CAMERA_IP}:{CAMERA_PORT}/cmd/delete/{media_id}/{kind.upper()}"
     try:
         resp = await asyncio.to_thread(lambda: _cam_session.get(url, timeout=5))
         result = resp.json()
         if result.get("code") == 0:
             _media[:] = [m for m in _media
-                         if not (m["id"] == media_id and m["kind"] == kind.lower())]
+                         if not (m["id"] == media_id and m["kind"] == kind_lower)]
             _state["media_count"] = len(_media)
-            await asyncio.to_thread(_db.delete_media, media_id, kind.lower())
-            cached_thumb = THUMB_DIR / f"{media_id}_{kind.lower()}.jpg"
+            await asyncio.to_thread(_db.delete_media, media_id, kind_lower)
+            cached_thumb = THUMB_DIR / f"{media_id}_{kind_lower}.jpg"
             await asyncio.to_thread(cached_thumb.unlink, True)
             await _broadcast({**_broadcast_state(), "type": "media_deleted",
-                              "id": media_id, "kind": kind.lower()})
+                              "id": media_id, "kind": kind_lower})
             return {"success": True}
         raise HTTPException(500, result.get("desc", "Delete failed"))
     except HTTPException:

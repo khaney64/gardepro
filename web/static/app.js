@@ -77,7 +77,7 @@ function handleEvent(data) {
       fetchMedia();
       fetchAnalysis();
     }
-    if (S.multiSelect && S.status !== 'connected') exitMultiSelect();
+    if (S.multiSelect && S.status === 'connecting') exitMultiSelect();
     updateUI();
 
   } else if (data.type === 'signal') {
@@ -412,7 +412,7 @@ function makeThumbCard(item, idx) {
   // Long-press → multi-select
   let timer = null;
   card.addEventListener('touchstart', () => {
-    timer = setTimeout(() => { if (S.status === 'connected') { enterMultiSelect(); toggleSelect(item, card); } }, 500);
+    timer = setTimeout(() => { enterMultiSelect(); toggleSelect(item, card); }, 500);
   }, { passive: true });
   card.addEventListener('touchend',  () => clearTimeout(timer));
   card.addEventListener('touchmove', () => clearTimeout(timer), { passive: true });
@@ -461,7 +461,6 @@ function scrollToTop() {
 // ── Multi-select ──────────────────────────────────────────────────────────────
 
 function enterMultiSelect() {
-  if (S.status !== 'connected') return;
   S.multiSelect = true;
   document.body.classList.add('multiselect-mode');
   show('select-all-btn', true);
@@ -555,7 +554,7 @@ function renderLightboxItem() {
   delBtn.dataset.savedId = item.saved_id || '';
   delBtn.dataset.id      = isLocal ? item.cam_id : item.id;
   delBtn.dataset.kind    = item.kind;
-  delBtn.classList.toggle('hidden', !isLocal && S.status !== 'connected');
+  delBtn.classList.toggle('hidden', false);
 
   // Save: only for gallery items
   const saveBtn = el('lb-save-btn');

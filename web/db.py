@@ -61,9 +61,10 @@ class CacheDB:
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_DDL)
         # Migrate existing DBs that predate newer columns
-        for col, defn in [("file_cached",  "INTEGER NOT NULL DEFAULT 0"),
-                          ("file_path",    "TEXT"),
-                          ("captured_at",  "TEXT")]:
+        for col, defn in [("file_cached",    "INTEGER NOT NULL DEFAULT 0"),
+                          ("file_path",      "TEXT"),
+                          ("captured_at",    "TEXT"),
+                          ("pending_delete", "INTEGER NOT NULL DEFAULT 0")]:
             try:
                 self._conn.execute(f"ALTER TABLE media ADD COLUMN {col} {defn}")
             except Exception:
@@ -82,7 +83,8 @@ class CacheDB:
 
     def get_all_media(self) -> list[dict]:
         rows = self._conn.execute(
-            "SELECT id, kind, thumb_cached, thumb_path FROM media ORDER BY id"
+            "SELECT id, kind, thumb_cached, thumb_path FROM media"
+            " WHERE pending_delete=0 ORDER BY id"
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -144,15 +146,26 @@ class CacheDB:
             if row["file_path"]:  Path(row["file_path"]).unlink(missing_ok=True)
         self._conn.execute("DELETE FROM media WHERE id=? AND kind=?", (id, kind))
 
+    def mark_for_deletion(self, id: int, kind: str):
+        self._conn.execute(
+            "UPDATE media SET pending_delete=1 WHERE id=? AND kind=?", (id, kind)
+        )
+
+    def get_pending_deletions(self) -> list[dict]:
+        return [dict(r) for r in self._conn.execute(
+            "SELECT id, kind FROM media WHERE pending_delete=1"
+        ).fetchall()]
+
     def get_uncached_thumbs(self) -> list[dict]:
         rows = self._conn.execute(
-            "SELECT id, kind FROM media WHERE thumb_cached=0"
+            "SELECT id, kind FROM media WHERE thumb_cached=0 AND pending_delete=0"
         ).fetchall()
         return [dict(r) for r in rows]
 
     def get_unanalyzed_media(self) -> list[dict]:
         rows = self._conn.execute(
-            "SELECT id, kind, thumb_path FROM media WHERE analyzed=0 AND thumb_cached=1"
+            "SELECT id, kind, thumb_path FROM media"
+            " WHERE analyzed=0 AND thumb_cached=1 AND pending_delete=0"
         ).fetchall()
         return [dict(r) for r in rows]
 
