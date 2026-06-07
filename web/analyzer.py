@@ -2,11 +2,14 @@
 import asyncio
 import base64
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Optional
 
 import requests
+
+_log = logging.getLogger(__name__)
 
 _CONFIG_PATH = Path.home() / ".gardepro" / "analysis_config.json"
 
@@ -211,8 +214,14 @@ async def chat_image(thumb_path: str, prompt: str, config: Optional[dict] = None
     try:
         result = await asyncio.to_thread(_call_raw, thumb_path, cfg)
         if not result.get("description") and int(cfg.get("thinking_budget", 0)) > 0:
-            retry_cfg = {**cfg, "thinking_budget": int(cfg["thinking_budget"]) * 2}
+            budget = int(cfg["thinking_budget"]) * 2
+            _log.warning("chat empty response — retrying with thinking_budget=%d", budget)
+            retry_cfg = {**cfg, "thinking_budget": budget}
             result = await asyncio.to_thread(_call_raw, thumb_path, retry_cfg)
+            if result.get("description"):
+                _log.info("chat retry succeeded (thinking_budget=%d)", budget)
+            else:
+                _log.warning("chat retry also returned empty (thinking_budget=%d)", budget)
         return result
     except Exception as exc:
         return {"description": "", "error": str(exc)}
@@ -229,8 +238,14 @@ async def analyze_image(thumb_path: str, config: Optional[dict] = None) -> dict:
     try:
         result = await asyncio.to_thread(_call, thumb_path, cfg)
         if not result.get("description") and int(cfg.get("thinking_budget", 0)) > 0:
-            retry_cfg = {**cfg, "thinking_budget": int(cfg["thinking_budget"]) * 2}
+            budget = int(cfg["thinking_budget"]) * 2
+            _log.warning("analysis empty response — retrying with thinking_budget=%d", budget)
+            retry_cfg = {**cfg, "thinking_budget": budget}
             result = await asyncio.to_thread(_call, thumb_path, retry_cfg)
+            if result.get("description"):
+                _log.info("analysis retry succeeded (thinking_budget=%d)", budget)
+            else:
+                _log.warning("analysis retry also returned empty (thinking_budget=%d)", budget)
         return result
     except Exception as exc:
         return {"subjects": [], "description": "", "error": str(exc)}
