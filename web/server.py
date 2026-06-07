@@ -1129,6 +1129,7 @@ async def api_thumb(media_id: int, kind: str):
         resp = await asyncio.to_thread(lambda: _cam_session.get(url, timeout=3))
         if resp.status_code != 200:
             raise HTTPException(404)
+        cached.write_bytes(resp.content)
         return Response(
             content=resp.content,
             media_type="image/jpeg",

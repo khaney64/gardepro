@@ -804,10 +804,14 @@ async function lightboxSave() {
 
 // Keyboard navigation in lightbox
 document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    if (!el('chat-dialog').classList.contains('hidden')) { closeChatDialog(); return; }
+    if (el('lightbox').classList.contains('open')) closeLightbox();
+    return;
+  }
   if (!el('lightbox').classList.contains('open')) return;
   if (e.key === 'ArrowLeft')  lightboxPrev();
   if (e.key === 'ArrowRight') lightboxNext();
-  if (e.key === 'Escape')     closeLightbox();
 });
 
 // ── Settings tab ──────────────────────────────────────────────────────────────

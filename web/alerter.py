@@ -120,7 +120,7 @@ def check_and_alert(
         thumb_url = f"http://{pi_host}/api/thumb/{media_id}/{kind}"
         if action == "email":
             detected = ", ".join(matched_subjects) if matched_subjects else analysis.get("description", "")
-            subj = f"GardePro alert: {name} detected"
+            subj = f"GardePro alert: {detected} detected"
             plain = (
                 f"Detection: {detected}\n"
                 f"Thumbnail: {thumb_url}\n\n"
@@ -130,7 +130,7 @@ def check_and_alert(
                       f'<a href="{thumb_url}">View thumbnail</a>'
             html = f"""\
 <html><body style="font-family:sans-serif;max-width:600px">
-<h2 style="margin-bottom:4px">GardePro alert: {name}</h2>
+<h2 style="margin-bottom:4px">GardePro alert: {detected}</h2>
 <p style="margin-top:0;color:#666">{detected}</p>
 {img_tag}
 <p style="color:#888;font-size:0.85em">{analysis.get('description', '')}</p>
