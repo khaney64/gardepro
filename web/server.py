@@ -119,6 +119,7 @@ _chain_analysis_task: Optional[asyncio.Task] = None
 _rtsp_server       = None
 _hls_proc          = None
 _shutting_down      = False
+_last_camera_ssid:  Optional[str] = None   # remembered across retry attempts within a sync cycle
 _alert_rules:       list[dict] = []
 _analysis_config:   dict = {}
 
@@ -484,6 +485,29 @@ async def _analysis_loop():
     await _log("Analysis: done")
 
 
+async def _connect_with_retry(label: str) -> bool:
+    """Run _connection_flow with up to AUTO_SYNC_RETRIES+1 attempts. Returns True if connected."""
+    for _attempt in range(1, AUTO_SYNC_RETRIES + 2):
+        await _log(f"{label}: connecting (attempt {_attempt}/{AUTO_SYNC_RETRIES + 1})…")
+        try:
+            await _connection_flow(skip_ble_wake=(_attempt == 2))
+            if _state["status"] == "connected":
+                return True
+            else:
+                if _attempt <= AUTO_SYNC_RETRIES:
+                    await _log(f"{label}: attempt {_attempt} failed — retrying in {AUTO_SYNC_RETRY_DELAY}s")
+                    await asyncio.sleep(AUTO_SYNC_RETRY_DELAY)
+                else:
+                    await _log(f"{label}: all {AUTO_SYNC_RETRIES + 1} attempts failed")
+        except Exception as exc:
+            if _attempt <= AUTO_SYNC_RETRIES:
+                await _log(f"{label}: attempt {_attempt} exception — {exc}; retrying in {AUTO_SYNC_RETRY_DELAY}s")
+                await asyncio.sleep(AUTO_SYNC_RETRY_DELAY)
+            else:
+                await _log(f"{label}: all attempts failed — {exc}")
+    return False
+
+
 async def _auto_sync_loop():
     """
     Periodic background sync.
@@ -514,42 +538,30 @@ async def _auto_sync_loop():
             await _sync_cache()
             await _log("Auto-sync: done")
         elif _state["status"] == "disconnected":
-            for _attempt in range(1, AUTO_SYNC_RETRIES + 2):
-                await _log(f"Auto-sync: connecting (attempt {_attempt}/{AUTO_SYNC_RETRIES + 1})…")
-                try:
-                    await _connection_flow()
-                    if _state["status"] == "connected":
-                        # Cancel before any await — chain_analysis hasn't started yet,
-                        # so this prevents it from running _analysis_loop a second time.
-                        if _chain_analysis_task and not _chain_analysis_task.done():
-                            _chain_analysis_task.cancel()
-                        if _thumb_cache_task and not _thumb_cache_task.done():
-                            try:
-                                await _thumb_cache_task
-                            except Exception:
-                                pass
-                        await _analysis_loop()
-                        await _disconnect_flow()
-                        await _log("Auto-sync: completed successfully")
-                        break
-                    else:
-                        if _attempt <= AUTO_SYNC_RETRIES:
-                            await _log(f"Auto-sync: attempt {_attempt} failed — retrying in {AUTO_SYNC_RETRY_DELAY}s")
-                            await asyncio.sleep(AUTO_SYNC_RETRY_DELAY)
-                        else:
-                            await _log(f"Auto-sync: all {AUTO_SYNC_RETRIES + 1} attempts failed")
-                except Exception as exc:
-                    if _attempt <= AUTO_SYNC_RETRIES:
-                        await _log(f"Auto-sync: attempt {_attempt} exception — {exc}; retrying in {AUTO_SYNC_RETRY_DELAY}s")
-                        await asyncio.sleep(AUTO_SYNC_RETRY_DELAY)
-                    else:
-                        await _log(f"Auto-sync: all attempts failed — {exc}")
+            connected = await _connect_with_retry("Auto-sync")
+            if connected:
+                # Cancel before any await — chain_analysis hasn't started yet,
+                # so this prevents it from running _analysis_loop a second time.
+                if _chain_analysis_task and not _chain_analysis_task.done():
+                    _chain_analysis_task.cancel()
+                if _thumb_cache_task and not _thumb_cache_task.done():
+                    try:
+                        await _thumb_cache_task
+                    except Exception:
+                        pass
+                await _analysis_loop()
+                await _disconnect_flow()
+                await _log("Auto-sync: completed successfully")
+            else:
+                # All attempts exhausted — wait a full interval before retrying
+                # so we don't spin immediately (last_synced won't have been updated).
+                await asyncio.sleep(SYNC_INTERVAL)
 
 
 # ── Connection flow ───────────────────────────────────────────────────────────
 
-async def _connection_flow():
-    global _media
+async def _connection_flow(skip_ble_wake: bool = False):
+    global _media, _last_camera_ssid
     iface = await asyncio.to_thread(linux_get_wifi_interface, WIFI_IFACE_OVERRIDE)
 
     try:
@@ -561,38 +573,48 @@ async def _connection_flow():
             )
 
         _state["status"] = "connecting"
-        await _set_step("Scanning for camera via Bluetooth…")
 
-        address = await find_device(CAMERA_BLE_ADDRESS, BLE_ADAPTER)
-        if not address:
-            raise RuntimeError("Camera not found via BLE. Is it powered on and nearby?")
-
-        await _set_step("Sending wake pulse…")
-
-        ble_kwargs = {}
-        adapter_args = bluez_args(BLE_ADAPTER)
-        if adapter_args:
-            ble_kwargs["bluez"] = adapter_args
-
-        async with BleakClient(address, **ble_kwargs) as client:
-            await client.start_notify(AT_CHAR, lambda _c, _d: None)
-            for _ in range(3):
-                await client.write_gatt_char(AT_CHAR, WAKE_CMD, response=True)
-                await asyncio.sleep(0.4)
-
-        raw_addr = getattr(address, "address", str(address))
-        ssid = "CAM8Z8_" + raw_addr.replace(":", "").upper()
-        await _set_step(f"Waiting for hotspot {ssid}…")
-
-        found = False
-        for _ in range(60):
-            await asyncio.sleep(1)
+        if skip_ble_wake and _last_camera_ssid:
+            ssid = _last_camera_ssid
+            await _set_step(f"Retry: checking hotspot {ssid}…")
             nets = await asyncio.to_thread(linux_scan_wifi, iface)
-            if ssid in nets:
-                found = True
-                break
-        if not found:
-            raise RuntimeError(f"Hotspot {ssid!r} did not appear within 60 s.")
+            if ssid not in nets:
+                raise RuntimeError(f"Hotspot {ssid!r} gone — will retry with full wake.")
+            await _log(f"Retry: hotspot still up, skipping BLE wake ({ssid})")
+        else:
+            await _set_step("Scanning for camera via Bluetooth…")
+
+            address = await find_device(CAMERA_BLE_ADDRESS, BLE_ADAPTER)
+            if not address:
+                raise RuntimeError("Camera not found via BLE. Is it powered on and nearby?")
+
+            await _set_step("Sending wake pulse…")
+
+            ble_kwargs = {}
+            adapter_args = bluez_args(BLE_ADAPTER)
+            if adapter_args:
+                ble_kwargs["bluez"] = adapter_args
+
+            async with BleakClient(address, **ble_kwargs) as client:
+                await client.start_notify(AT_CHAR, lambda _c, _d: None)
+                for _ in range(3):
+                    await client.write_gatt_char(AT_CHAR, WAKE_CMD, response=True)
+                    await asyncio.sleep(0.4)
+
+            raw_addr = getattr(address, "address", str(address))
+            ssid = "CAM8Z8_" + raw_addr.replace(":", "").upper()
+            _last_camera_ssid = ssid
+            await _set_step(f"Waiting for hotspot {ssid}…")
+
+            found = False
+            for _ in range(60):
+                await asyncio.sleep(1)
+                nets = await asyncio.to_thread(linux_scan_wifi, iface)
+                if ssid in nets:
+                    found = True
+                    break
+            if not found:
+                raise RuntimeError(f"Hotspot {ssid!r} did not appear within 60 s.")
 
         await _set_step(f"Connecting {iface} to {ssid}…")
         _t0 = time.monotonic()
@@ -667,6 +689,16 @@ async def _connection_flow():
             "status": "disconnected", "step": "", "error": "Cancelled",
             "media_count": len(_media), "last_synced": _db.get_last_synced(),
         })
+        if _state.get("camera_ip"):
+            try:
+                await asyncio.to_thread(
+                    lambda: _cam_session.get(
+                        f"http://{CAMERA_IP}:{CAMERA_PORT}/cmd/standby/now",
+                        timeout=(1.0, 3.0)
+                    )
+                )
+            except Exception:
+                pass
         try:
             await asyncio.to_thread(linux_disconnect_wifi, iface)
         except Exception:
@@ -682,6 +714,16 @@ async def _connection_flow():
             "status": "disconnected", "step": "", "error": str(exc),
             "media_count": len(_media), "last_synced": _db.get_last_synced(),
         })
+        if _state.get("camera_ip"):
+            try:
+                await asyncio.to_thread(
+                    lambda: _cam_session.get(
+                        f"http://{CAMERA_IP}:{CAMERA_PORT}/cmd/standby/now",
+                        timeout=(1.0, 3.0)
+                    )
+                )
+            except Exception:
+                pass
         try:
             await asyncio.to_thread(linux_disconnect_wifi, iface)
         except Exception:
@@ -924,8 +966,8 @@ async def api_sync():
         async def _connect_sync_disconnect():
             global _thumb_cache_task
             try:
-                await _connection_flow()
-                if _state["status"] == "connected":
+                connected = await _connect_with_retry("Sync")
+                if connected:
                     if _thumb_cache_task and not _thumb_cache_task.done():
                         try:
                             await _thumb_cache_task
@@ -947,7 +989,7 @@ async def api_connect():
     global _connect_task
     if _state["status"] not in ("disconnected",):
         raise HTTPException(409, detail=f"Status is '{_state['status']}' — cannot connect")
-    _connect_task = asyncio.create_task(_connection_flow())
+    _connect_task = asyncio.create_task(_connect_with_retry("Connect"))
     return {"status": "connecting"}
 
 
