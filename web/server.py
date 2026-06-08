@@ -120,6 +120,7 @@ _rtsp_server       = None
 _hls_proc          = None
 _shutting_down      = False
 _last_camera_ssid:  Optional[str] = None   # remembered across retry attempts within a sync cycle
+_connection_lock    = asyncio.Lock()        # prevents concurrent _connection_flow calls
 _alert_rules:       list[dict] = []
 _analysis_config:   dict = {}
 
@@ -335,21 +336,26 @@ async def _flush_pending_deletions():
 async def _enumerate_media() -> list[dict]:
     global _media
     results: list[dict] = []
-    MAX_MISSES = 10
+    MAX_MISSES   = 10   # consecutive misses past last found image → stop
+    FLOOR_BUFFER = 30   # scan at least this far past the known max before stopping
     media_id = 1
     last_found_id = 0
 
-    # Use the highest ID already in the DB as a scan floor so that gaps caused
-    # by on-camera deletion (which can exceed MAX_MISSES) don't terminate the
-    # scan before we reach IDs that still exist beyond the gap.
+    # Use the highest ID ever seen (high-water mark) as the scan floor, not just
+    # the current DB max. After a flush, deleted rows are gone from the DB so
+    # db_max drops — but the camera may have new images beyond that gap. The HWM
+    # only ever increases, so it correctly anchors the floor across deletions.
     db_max = await asyncio.to_thread(_db.get_max_media_id)
+    hwm    = await asyncio.to_thread(_db.get_scan_hwm)
+    candidates = [x for x in [db_max, hwm] if x is not None]
+    floor  = max(candidates) if candidates else None
 
     while True:
         # Stop only when both conditions hold:
         #   1. We've seen MAX_MISSES consecutive non-hits past the last found item
         #   2. We're also past the DB floor (highest previously-known ID + buffer)
         trailing_clear = (media_id - last_found_id) >= MAX_MISSES
-        past_db_floor  = (db_max is None) or (media_id > db_max + MAX_MISSES)
+        past_db_floor  = (floor is None) or (media_id > floor + FLOOR_BUFFER)
         if trailing_clear and past_db_floor:
             break
 
@@ -385,12 +391,20 @@ async def _enumerate_media() -> list[dict]:
             _state["media_count"] = len(results)
             await _broadcast({"type": "media_progress", "count": len(results)})
 
+    if not results:
+        # Scan found nothing — camera may have been unreachable mid-scan.
+        # Preserve the existing gallery rather than wiping it.
+        await _log("Media scan returned no results — preserving cached gallery")
+        return results
+
     _media = results
     _state["media_count"] = len(results)
 
     def _sync_to_db(items):
         for item in items:
             _db.upsert_media(item["id"], item["kind"], item.get("captured_at"))
+        if items:
+            _db.set_scan_hwm(max(item["id"] for item in items))
         pending_ids = {(r["id"], r["kind"]) for r in _db.get_pending_deletions()}
         _db.set_last_synced()
         _state["last_synced"] = _db.get_last_synced()
@@ -562,6 +576,13 @@ async def _auto_sync_loop():
 
 async def _connection_flow(skip_ble_wake: bool = False):
     global _media, _last_camera_ssid
+
+    # Atomically claim the connecting slot — prevents two concurrent flows racing.
+    async with _connection_lock:
+        if _state["status"] != "disconnected":
+            return  # another flow already claimed it; caller checks status
+        _state["status"] = "connecting"
+
     iface = await asyncio.to_thread(linux_get_wifi_interface, WIFI_IFACE_OVERRIDE)
 
     try:
@@ -571,8 +592,6 @@ async def _connection_flow(skip_ble_wake: bool = False):
                 "Camera WiFi password not set. "
                 "Start the server with GARDEPRO_WIFI_PASSWORD=<password>"
             )
-
-        _state["status"] = "connecting"
 
         if skip_ble_wake and _last_camera_ssid:
             ssid = _last_camera_ssid

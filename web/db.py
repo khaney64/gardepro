@@ -125,6 +125,20 @@ class CacheDB:
         row = self._conn.execute("SELECT MAX(id) AS m FROM media").fetchone()
         return row["m"] if row else None
 
+    def get_scan_hwm(self) -> Optional[int]:
+        """High-water mark: the highest camera media ID ever seen. Never decreases."""
+        row = self._conn.execute(
+            "SELECT value FROM meta WHERE key='scan_hwm'"
+        ).fetchone()
+        return int(row["value"]) if row else None
+
+    def set_scan_hwm(self, hwm: int):
+        self._conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('scan_hwm', ?)"
+            " ON CONFLICT(key) DO UPDATE SET value=MAX(CAST(value AS INTEGER), ?)",
+            (hwm, hwm),
+        )
+
     def mark_thumb_cached(self, id: int, kind: str, path: str):
         self._conn.execute(
             "UPDATE media SET thumb_cached=1, thumb_path=? WHERE id=? AND kind=?",
