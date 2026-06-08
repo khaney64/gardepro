@@ -621,6 +621,12 @@ def linux_connect_wifi(ssid, password, iface):
 def linux_wait_for_ip(iface, timeout=20):
     """Wait until iface has a non-APIPA IP. Returns (my_ip, gateway) or (None, None)."""
     print(f"  Requesting DHCP on {iface} (dhcpcd) ...")
+    # Kill any prior dhcpcd on this interface before starting a new one.
+    try:
+        subprocess.run(["sudo", "pkill", "-f", f"dhcpcd.*{iface}"],
+                       timeout=5, capture_output=True)
+    except Exception:
+        pass
     try:
         subprocess.run(
             ["sudo", "dhcpcd", "-1", iface],
@@ -749,8 +755,13 @@ def linux_disconnect_wifi(iface):
     """Tear down the camera WiFi connection on iface (wlan0 is unaffected)."""
     print(f"  Disconnecting {iface} from camera network ...")
     _linux_kill_wpa_supplicant(iface)
-    # dhcpcd was run in one-shot mode (-1) so there is no daemon to kill;
-    # bringing the interface down is sufficient to release the address.
+    # Kill any orphaned dhcpcd on this interface. When subprocess.run(timeout=...)
+    # fires, it SIGKILLs sudo but dhcpcd (a grandchild) survives as an orphan.
+    try:
+        subprocess.run(["sudo", "pkill", "-f", f"dhcpcd.*{iface}"],
+                       timeout=5, capture_output=True)
+    except Exception:
+        pass
     try:
         subprocess.run(["sudo", "ip", "addr", "flush", "dev", iface],
                        timeout=5, capture_output=True)
