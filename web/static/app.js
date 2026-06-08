@@ -1244,7 +1244,7 @@ async function fetchLogs() {
     const output = el('logs-output');
     if (!output) return;
     output.innerHTML = '';
-    (d.entries || []).forEach(appendLog);
+    (d.entries || []).forEach(e => appendLog(e));
     output.scrollTop = output.scrollHeight;
   } catch (_) {}
 }
