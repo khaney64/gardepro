@@ -417,9 +417,15 @@ function makeThumbCard(item, idx) {
   card.addEventListener('touchend',  () => clearTimeout(timer));
   card.addEventListener('touchmove', () => clearTimeout(timer), { passive: true });
 
-  card.addEventListener('click', () => {
-    if (S.multiSelect) toggleSelect(item, card);
-    else openLightbox(idx);
+  card.addEventListener('click', (e) => {
+    if (e.ctrlKey || e.metaKey) {
+      if (!S.multiSelect) enterMultiSelect();
+      toggleSelect(item, card);
+    } else if (S.multiSelect) {
+      toggleSelect(item, card);
+    } else {
+      openLightbox(idx);
+    }
   });
 
   return card;
