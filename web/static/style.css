@@ -522,7 +522,7 @@ header {
   overflow-y: auto;
 }
 .log-line { padding: 1px 0; line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
-.log-line--error { color: #e05050; font-weight: 600; }
-.log-line--error .log-ts { color: #c04040; }
+.log-line--error { font-weight: 600; }
+.log-line--error .log-ts { color: #607090; }
 .log-ts { color: #607090; margin-right: 10px; }
 .last-synced-label.stale { color: #e67e22; }
