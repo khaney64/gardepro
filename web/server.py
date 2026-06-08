@@ -14,7 +14,7 @@ Environment variables:
   GARDEPRO_WIFI_IFACE             WiFi interface for camera (default: first wlx* found)
   GARDEPRO_RTSP_PORT              Local port for RTSP TCP proxy (default: 8554)
   GARDEPRO_AUTO_CONNECT           Set to 1 to enable periodic background sync
-  GARDEPRO_SYNC_INTERVAL          Seconds between auto-sync attempts (default: 600)
+  GARDEPRO_SYNC_INTERVAL          Seconds between auto-sync attempts (default: 900)
   GARDEPRO_LLM_URL                Base URL of llama.cpp OpenAI API (default: http://devbox.lan:8080)
   GARDEPRO_LLM_MODEL              Model name for vision analysis (required for analysis)
   GARDEPRO_ALERT_EMAIL            Recipient address for email alerts
@@ -77,7 +77,7 @@ RTSP_PORT_LOCAL     = int(os.environ.get("GARDEPRO_RTSP_PORT", "8554"))
 HLS_TMP_DIR         = Path("/tmp/gardepro_hls")
 STATIC_DIR          = Path(__file__).parent / "static"
 AUTO_CONNECT        = os.environ.get("GARDEPRO_AUTO_CONNECT", "").strip() in ("1", "true", "yes")
-SYNC_INTERVAL          = int(os.environ.get("GARDEPRO_SYNC_INTERVAL", "600"))
+SYNC_INTERVAL          = int(os.environ.get("GARDEPRO_SYNC_INTERVAL", "900"))
 DHCP_TIMEOUT           = 30   # seconds — all observed successes in 6–13s; was hardcoded 90
 AUTO_SYNC_RETRIES      = 2    # extra attempts after first failure
 AUTO_SYNC_RETRY_DELAY  = 30   # seconds between retry attempts
