@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="theme-color" content="#1a1a2e">
   <title>GardePro</title>
-  <link rel="stylesheet" href="/static/style.css?v=9">
+  <link rel="stylesheet" href="/static/style.css?v=11">
 </head>
 <body>
 
@@ -18,6 +18,7 @@
       <span id="status-dot" class="status-dot"></span>
       <span id="status-label" class="status-label"></span>
       <span id="signal-badge" class="signal-badge hidden"></span>
+      <span id="battery-badge" class="battery-badge hidden"></span>
       <span id="last-event-label" class="last-event-label"></span>
     </div>
     <nav id="tab-nav" class="tab-nav desktop-only">
@@ -222,6 +223,13 @@
                 <span class="muted">min between alerts per rule</span>
               </div>
             </div>
+            <div class="form-row">
+              <label>Battery</label>
+              <div style="display:flex;align-items:center;gap:6px">
+                <input id="battery-warning-threshold" type="number" min="1" max="100" style="width:70px" value="25">
+                <span class="muted">% — alerts here & every 5% below; auto-sync stops ≤10%</span>
+              </div>
+            </div>
             <div id="alert-rule-toggles"></div>
             <div class="form-row form-actions">
               <span id="alerts-save-status" class="muted"></span>
@@ -337,6 +345,6 @@
 
   <!-- HLS.js from CDN (loaded only when needed) -->
   <script src="https://cdn.jsdelivr.net/npm/hls.js@latest/dist/hls.min.js"></script>
-  <script src="/static/app.js?v=11"></script>
+  <script src="/static/app.js?v=15"></script>
 </body>
 </html>

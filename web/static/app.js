@@ -9,6 +9,12 @@ const S = {
   hlsActive: false,
   signalDbm: null,
   signalLabel: null,
+  batteryPct: null,
+  batteryMv: null,
+  batteryTemp: null,
+  extPower: null,
+  batteryUpdated: null,
+  autosyncPausedBattery: false,
   error: null,
   lastSynced: null,
   lastEvent: null,
@@ -68,6 +74,12 @@ function handleEvent(data) {
     S.lastSynced  = data.last_synced || null;
     S.lastEvent   = data.last_event  || null;
     if (data.signal_dbm != null) { S.signalDbm = data.signal_dbm; S.signalLabel = data.signal_label; }
+    if (data.battery_pct != null) { S.batteryPct = data.battery_pct; }
+    if (data.battery_mv != null) { S.batteryMv = data.battery_mv; }
+    if (data.battery_temp != null) { S.batteryTemp = data.battery_temp; }
+    if (data.ext_power != null) { S.extPower = data.ext_power; }
+    if (data.battery_updated != null) { S.batteryUpdated = data.battery_updated; }
+    S.autosyncPausedBattery = !!data.autosync_paused_battery;
 
     if (!wasConnected && S.status === 'connected') {
       fetchMedia();
@@ -84,6 +96,14 @@ function handleEvent(data) {
     S.signalDbm   = data.dbm;
     S.signalLabel = data.label;
     updateSignalBadge();
+
+  } else if (data.type === 'battery') {
+    S.batteryPct  = data.pct;
+    S.batteryMv   = data.mv;
+    S.batteryTemp = data.temp;
+    S.extPower    = data.ext_power;
+    S.batteryUpdated = data.updated || S.batteryUpdated;
+    updateBatteryBadge();
 
   } else if (data.type === 'media_progress') {
     S.mediaCount = data.count;
@@ -245,10 +265,14 @@ function updateUI() {
       show('connect-modal-cancel', false);
       show('connect-modal-close', true);
       el('connect-modal-x').style.display = '';
+    } else if (S.status === 'disconnected') {
+      // Cancelled or otherwise ended without error — close modal
+      closeConnectModal();
     }
   }
 
   updateSignalBadge();
+  updateBatteryBadge();
   updateLiveTab();
   updateSettingsTab();
 }
@@ -262,6 +286,33 @@ function updateSignalBadge() {
   } else {
     badge.classList.add('hidden');
   }
+}
+
+function updateBatteryBadge() {
+  const badge = el('battery-badge');
+  if (S.batteryPct == null) {
+    badge.classList.add('hidden');
+    return;
+  }
+  const live = S.status === 'connected';
+  const pct = S.batteryPct;
+  const charging = S.extPower != null && S.extPower !== 0;
+  const icon = charging ? '🔌' : '🔋';
+  let cls = 'battery-good';
+  if (charging) cls = 'battery-charging';
+  else if (pct <= 20) cls = 'battery-low';
+  else if (pct <= 50) cls = 'battery-mid';
+  if (!live) cls += ' battery-stale';
+  const asOf = S.batteryUpdated ? formatRelativeTime(S.batteryUpdated) : null;
+  const title = `Battery ${pct}%`
+    + (S.batteryMv != null ? ` · ${(S.batteryMv / 1000).toFixed(2)} V` : '')
+    + (S.batteryTemp != null ? ` · ${S.batteryTemp}°C` : '')
+    + (charging ? ' · external power' : '')
+    + (live ? '' : (asOf ? ` · as of last sync (${asOf})` : ' · as of last sync'));
+  badge.textContent = `${icon} ${pct}%` + (charging ? ' ⚡' : '') + (live ? '' : ' ·');
+  badge.title = title;
+  badge.className = 'battery-badge ' + cls;
+  badge.classList.remove('hidden');
 }
 
 function showConnectLog(visible) {
@@ -864,6 +915,7 @@ async function loadAnalysisConfig() {
 
     // Cooldown
     el('alert-cooldown-minutes').value = d.alert_cooldown_minutes ?? 30;
+    el('battery-warning-threshold').value = d.battery_warning_threshold ?? 25;
 
     // Per-rule toggles
     const rulesEnabled = d.alert_rules_enabled || {};
@@ -916,6 +968,7 @@ async function saveAnalysisConfig() {
       thinking_budget:        parseInt(el('analysis-thinking-budget').value, 10) || 0,
       temperature:            parseFloat(el('analysis-temperature').value),
       alert_cooldown_minutes: parseInt(el('alert-cooldown-minutes').value, 10) || 0,
+      battery_warning_threshold: parseInt(el('battery-warning-threshold').value, 10) || 25,
       alert_rules_enabled:    alertRulesEnabled,
       chat_enabled:           el('chat-enabled').checked,
     };
@@ -1107,9 +1160,10 @@ function updateOfflineBar() {
   if (S.lastSynced) {
     const diffMin = (Date.now() - new Date(S.lastSynced).getTime()) / 60000;
     const stale = diffMin > 12;
+    const paused = S.autosyncPausedBattery;
     label.textContent = 'Last synced: ' + formatRelativeTime(S.lastSynced)
-      + (stale ? ' ⚠' : '');
-    label.classList.toggle('stale', stale);
+      + (paused ? ` — auto-sync paused (battery ${S.batteryPct ?? '?'}%)` : (stale ? ' ⚠' : ''));
+    label.classList.toggle('stale', stale || paused);
   }
   const btn = el('offline-bar').querySelector('.btn');
   if (btn) {

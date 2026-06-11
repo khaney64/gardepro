@@ -79,6 +79,10 @@ STATIC_DIR          = Path(__file__).parent / "static"
 AUTO_CONNECT        = os.environ.get("GARDEPRO_AUTO_CONNECT", "").strip() in ("1", "true", "yes")
 SYNC_INTERVAL          = int(os.environ.get("GARDEPRO_SYNC_INTERVAL", "900"))
 DHCP_TIMEOUT           = 30   # seconds — all observed successes in 6–13s; was hardcoded 90
+BLE_CONNECT_TIMEOUT    = 20   # seconds — hard bound on BLE connect (bleak's own default is 10)
+BLE_OP_TIMEOUT         = 10   # seconds — hard bound on each notify/write_gatt_char
+BLE_DISCONNECT_TIMEOUT = 5    # seconds — hard bound on cleanup disconnect (BlueZ can wedge)
+BATTERY_AUTOSYNC_DISABLE_PCT = 10  # at/below this %, automatic sync is paused to save power
 AUTO_SYNC_RETRIES      = 2    # extra attempts after first failure
 AUTO_SYNC_RETRY_DELAY  = 30   # seconds between retry attempts
 HTTP_VERIFY_RETRIES    = 3    # camera HTTP may not be ready instantly after DHCP
@@ -100,6 +104,12 @@ _state: dict = {
     "my_ip":         None,
     "signal_dbm":    None,
     "signal_label":  None,
+    "battery_pct":   None,   # /cmd/info/2 "voltage" — battery percent 0–100
+    "battery_mv":    None,   # /cmd/info/2 "vol_value" — millivolts
+    "battery_temp":  None,   # /cmd/info/2 "temperature" — °C
+    "ext_power":     None,   # /cmd/info/2 "ext_power" — 0 = battery only, !=0 = external/charging
+    "battery_updated": None, # UTC ISO time of last battery reading (persists while disconnected)
+    "autosync_paused_battery": False,  # True when auto-sync is paused due to low battery
     "media_count":   0,
     "rtsp_url":      None,
     "hls_available": shutil.which("ffmpeg") is not None,
@@ -309,6 +319,95 @@ async def _signal_poll_loop(iface: str):
         await asyncio.sleep(10)
 
 
+_battery_alert_floor: Optional[int] = None  # lowest 5%-step level already alerted this discharge cycle
+
+
+def _battery_blocks_autosync() -> bool:
+    """True when the last-known battery level is at/below the auto-sync cutoff."""
+    pct = _state.get("battery_pct")
+    return isinstance(pct, (int, float)) and pct <= BATTERY_AUTOSYNC_DISABLE_PCT
+
+
+async def _evaluate_battery_alerts(pct: int, ext_power):
+    """Fire a low-battery alert when crossing the warning threshold and every 5% below.
+
+    With threshold 25, alerts fire as the level first reaches 25, 20, 15, 10, 5.
+    The floor resets once the battery recovers above the threshold (e.g. recharged),
+    so a later discharge re-alerts. Gated by the master 'Send alerts' toggle.
+    """
+    global _battery_alert_floor
+    threshold = int(_analysis_config.get("battery_warning_threshold", 25) or 25)
+    if pct > threshold:
+        _battery_alert_floor = None
+        return
+    # Descending 5%-step trigger points down to 5 (e.g. 25,20,15,10,5).
+    points = list(range(threshold, 0, -5))
+    level = None
+    for t in points:
+        if pct <= t:
+            level = t  # smallest satisfied point = current level reached
+    if level is None:
+        return
+    if not _analysis_config.get("alerts_enabled", False):
+        return
+    if _battery_alert_floor is None or level < _battery_alert_floor:
+        _battery_alert_floor = level
+        charging = bool(ext_power) and ext_power != 0
+        await _log(f"Battery low: {pct}% (≤{level}%) — sending alert")
+        try:
+            await asyncio.to_thread(alerter.send_battery_alert, int(pct), charging)
+        except Exception as exc:
+            await _log(f"Battery alert failed: {exc}")
+
+
+async def _battery_poll_loop():
+    """Poll camera power status (/cmd/info/2) and push updates over SSE.
+
+    Response shape (GardePro E6P):
+      {"code":0,"data":{"temperature":37,"voltage":62,"vol_value":4040,"ext_power":2}}
+    where `voltage` is battery percent, `vol_value` is millivolts, and `ext_power`
+    is 0 on battery / non-zero when running on external (DC/solar) power.
+    """
+    url = f"http://{CAMERA_IP}:{CAMERA_PORT}/cmd/info/2"
+    while _state["status"] == "connected":
+        try:
+            r = await asyncio.to_thread(
+                lambda: _cam_session.get(url, timeout=(1.0, 4.0))
+            )
+            data = (r.json() or {}).get("data") or {}
+            if data:
+                _state["battery_pct"]  = data.get("voltage")
+                _state["battery_mv"]   = data.get("vol_value")
+                _state["battery_temp"] = data.get("temperature")
+                _state["ext_power"]    = data.get("ext_power")
+                # Persist so the last-known reading survives disconnect / restart.
+                await asyncio.to_thread(_db.set_battery, {
+                    "battery_pct":  data.get("voltage"),
+                    "battery_mv":   data.get("vol_value"),
+                    "battery_temp": data.get("temperature"),
+                    "ext_power":    data.get("ext_power"),
+                })
+                _state["battery_updated"] = (_db.get_battery() or {}).get("updated")
+                await _broadcast({
+                    "type": "battery",
+                    "pct":       _state["battery_pct"],
+                    "mv":        _state["battery_mv"],
+                    "temp":      _state["battery_temp"],
+                    "ext_power": _state["ext_power"],
+                    "updated":   _state["battery_updated"],
+                })
+                pct = _state["battery_pct"]
+                if isinstance(pct, (int, float)):
+                    await _evaluate_battery_alerts(pct, _state["ext_power"])
+                    paused = _battery_blocks_autosync()
+                    if paused != _state.get("autosync_paused_battery"):
+                        _state["autosync_paused_battery"] = paused
+                        await _broadcast(_broadcast_state())
+        except Exception:
+            pass
+        await asyncio.sleep(60)
+
+
 # ── Media enumeration ─────────────────────────────────────────────────────────
 
 async def _flush_pending_deletions():
@@ -333,11 +432,12 @@ async def _flush_pending_deletions():
         await asyncio.to_thread(cached_thumb.unlink, True)
 
 
-async def _enumerate_media() -> list[dict]:
+async def _enumerate_media_probe() -> list[dict]:
+    """Fallback: sequential per-ID probe via /file/{id}/JPG."""
     global _media
     results: list[dict] = []
-    MAX_MISSES   = 10   # consecutive misses past last found image → stop
-    FLOOR_BUFFER = 30   # scan at least this far past the known max before stopping
+    MAX_MISSES   = 10
+    FLOOR_BUFFER = 30
     media_id = 1
     last_found_id = 0
 
@@ -351,16 +451,11 @@ async def _enumerate_media() -> list[dict]:
     floor  = max(candidates) if candidates else None
 
     while True:
-        # Stop only when both conditions hold:
-        #   1. We've seen MAX_MISSES consecutive non-hits past the last found item
-        #   2. We're also past the DB floor (highest previously-known ID + buffer)
         trailing_clear = (media_id - last_found_id) >= MAX_MISSES
         past_db_floor  = (floor is None) or (media_id > floor + FLOOR_BUFFER)
         if trailing_clear and past_db_floor:
             break
 
-        # Probe /file/ (not /thumb/) — both /JPG and /MP4 suffixes return the
-        # same underlying file; Content-Type tells us the actual type.
         url = f"http://{CAMERA_IP}:{CAMERA_PORT}/file/{media_id}/JPG"
         found = False
         try:
@@ -385,15 +480,57 @@ async def _enumerate_media() -> list[dict]:
             last_found_id = media_id
         media_id += 1
 
-        # Push incremental progress every 6 items
         if found and len(results) % 6 == 0:
             _media = list(results)
             _state["media_count"] = len(results)
             await _broadcast({"type": "media_progress", "count": len(results)})
 
+    return results
+
+
+async def _enumerate_media() -> list[dict]:
+    global _media
+    PAGE = 25
+    results: list[dict] = []
+
+    # Try the native listing endpoint first.
+    # Response: {"code": 0, "data": [{"id": N, "type": 1|2, "date": "YYYY-MM-DD HH:MM:SS", ...}, ...]}
+    # type=1 → jpg, type=2 → mp4.  Paging: {ts} is an item id; next page = min(id) from current page.
+    try:
+        known_rows = await asyncio.to_thread(_db.get_all_media)
+        known = {(r["id"], r["kind"]) for r in known_rows}
+        ts = 9999999999
+        seen_ids: set[int] = set()
+        while True:
+            url = f"http://{CAMERA_IP}:{CAMERA_PORT}/list/detail/backward/{ts}/{PAGE}"
+            resp = await asyncio.to_thread(lambda u=url: _cam_session.get(u, timeout=5))
+            page = resp.json()["data"]  # KeyError/ValueError if schema differs → fallback
+            if not page:
+                break
+            new_in_page = 0
+            for item in page:
+                iid  = item["id"]
+                kind = "mp4" if item["type"] == 2 else "jpg"
+                captured_at = item["date"].replace(" ", "T") + "Z"
+                if iid in seen_ids:
+                    continue
+                seen_ids.add(iid)
+                results.append({"id": iid, "kind": kind, "captured_at": captured_at})
+                if (iid, kind) not in known:
+                    new_in_page += 1
+            _media = list(results)
+            _state["media_count"] = len(results)
+            await _broadcast({"type": "media_progress", "count": len(results)})
+            if len(page) < PAGE:
+                break  # end of card
+            if new_in_page == 0:
+                break  # caught up to known history
+            ts = min(item["id"] for item in page)
+    except Exception as exc:
+        await _log(f"Listing scan failed ({exc}) — falling back to probe scan")
+        results = await _enumerate_media_probe()
+
     if not results:
-        # Scan found nothing — camera may have been unreachable mid-scan.
-        # Preserve the existing gallery rather than wiping it.
         await _log("Media scan returned no results — preserving cached gallery")
         return results
 
@@ -552,6 +689,16 @@ async def _auto_sync_loop():
             await _sync_cache()
             await _log("Auto-sync: done")
         elif _state["status"] == "disconnected":
+            if _battery_blocks_autosync():
+                if not _state.get("autosync_paused_battery"):
+                    _state["autosync_paused_battery"] = True
+                    await _log(
+                        f"Auto-sync paused — battery {_state.get('battery_pct')}% "
+                        f"≤ {BATTERY_AUTOSYNC_DISABLE_PCT}% (manual connect still allowed)"
+                    )
+                    await _broadcast(_broadcast_state())
+                await asyncio.sleep(SYNC_INTERVAL)
+                continue
             connected = await _connect_with_retry("Auto-sync")
             if connected:
                 # Cancel before any await — chain_analysis hasn't started yet,
@@ -614,11 +761,31 @@ async def _connection_flow(skip_ble_wake: bool = False):
             if adapter_args:
                 ble_kwargs["bluez"] = adapter_args
 
-            async with BleakClient(address, **ble_kwargs) as client:
-                await client.start_notify(AT_CHAR, lambda _c, _d: None)
+            # Bound every BLE op with a hard timeout. BlueZ can wedge a connect,
+            # start_notify, or response-write indefinitely; without these bounds the
+            # whole connect flow hangs (and Cancel can't clear it because the
+            # __aexit__ disconnect hangs too). Manage the client manually so the
+            # cleanup disconnect is itself time-bounded in finally.
+            client = BleakClient(address, **ble_kwargs)
+            try:
+                await asyncio.wait_for(client.connect(), timeout=BLE_CONNECT_TIMEOUT)
+                await asyncio.wait_for(
+                    client.start_notify(AT_CHAR, lambda _c, _d: None),
+                    timeout=BLE_OP_TIMEOUT,
+                )
                 for _ in range(3):
-                    await client.write_gatt_char(AT_CHAR, WAKE_CMD, response=True)
+                    await asyncio.wait_for(
+                        client.write_gatt_char(AT_CHAR, WAKE_CMD, response=True),
+                        timeout=BLE_OP_TIMEOUT,
+                    )
                     await asyncio.sleep(0.4)
+            except asyncio.TimeoutError:
+                raise RuntimeError("BLE wake timed out — camera BLE not responding")
+            finally:
+                try:
+                    await asyncio.wait_for(client.disconnect(), timeout=BLE_DISCONNECT_TIMEOUT)
+                except Exception:
+                    pass
 
             raw_addr = getattr(address, "address", str(address))
             ssid = "CAM8Z8_" + raw_addr.replace(":", "").upper()
@@ -689,6 +856,7 @@ async def _connection_flow(skip_ble_wake: bool = False):
         _background_tasks.clear()
         _background_tasks.append(asyncio.create_task(_keepalive_loop()))
         _background_tasks.append(asyncio.create_task(_signal_poll_loop(iface)))
+        _background_tasks.append(asyncio.create_task(_battery_poll_loop()))
         _thumb_cache_task = asyncio.create_task(_thumb_cache_loop())
         _background_tasks.append(_thumb_cache_task)
         async def _chain_analysis():
@@ -781,6 +949,7 @@ async def _disconnect_flow():
     _state.update({
         "status": "disconnected", "step": "", "camera_ip": None,
         "my_ip": None, "signal_dbm": None, "signal_label": None,
+        # battery_* are intentionally NOT reset — keep last-known reading while disconnected
         "media_count": len(_media), "rtsp_url": None, "error": None,
         "last_synced": _db.get_last_synced(),
     })
@@ -834,6 +1003,7 @@ async def _resume_session(iface: str, my_ip: str):
         global _thumb_cache_task
         _background_tasks.append(asyncio.create_task(_keepalive_loop()))
         _background_tasks.append(asyncio.create_task(_signal_poll_loop(iface)))
+        _background_tasks.append(asyncio.create_task(_battery_poll_loop()))
         _thumb_cache_task = asyncio.create_task(_thumb_cache_loop())
         _background_tasks.append(_thumb_cache_task)
         async def _chain_analysis_resume():
@@ -863,6 +1033,15 @@ async def lifespan(app: FastAPI):
         _state["media_count"] = len(_media)
         _state["last_synced"] = _db.get_last_synced()
         _state["last_event"]  = _db.get_last_event_time()
+
+    # Restore last-known battery reading so it shows while disconnected.
+    batt = await asyncio.to_thread(_db.get_battery)
+    if batt:
+        _state["battery_pct"]     = batt.get("battery_pct")
+        _state["battery_mv"]      = batt.get("battery_mv")
+        _state["battery_temp"]    = batt.get("battery_temp")
+        _state["ext_power"]       = batt.get("ext_power")
+        _state["battery_updated"] = batt.get("updated")
 
     if AUTO_CONNECT:
         asyncio.ensure_future(_auto_sync_loop())
@@ -1079,6 +1258,7 @@ async def api_analysis_config_set(body: dict):
         "thinking_budget": int,
         "temperature": float,
         "alert_cooldown_minutes": int,
+        "battery_warning_threshold": int,
     }
     update = {}
     for key, typ in scalar_fields.items():
@@ -1087,6 +1267,8 @@ async def api_analysis_config_set(body: dict):
                 update[key] = typ(body[key])
             except (ValueError, TypeError):
                 raise HTTPException(400, f"Invalid value for {key!r}")
+    if "battery_warning_threshold" in update:
+        update["battery_warning_threshold"] = max(1, min(100, update["battery_warning_threshold"]))
     if "alert_rules_enabled" in body:
         val = body["alert_rules_enabled"]
         if not isinstance(val, dict):
@@ -1441,10 +1623,32 @@ async def api_format(body: dict):
         raise HTTPException(400, 'Send {"confirm": "CONFIRM"} to proceed')
     if _state["status"] != "connected":
         raise HTTPException(503, "Not connected")
-    url = f"http://{CAMERA_IP}:{CAMERA_PORT}/cmd/format/start"
+    base = f"http://{CAMERA_IP}:{CAMERA_PORT}"
+    # The official app does POST /cmd/format/start (JSON body {}), then polls
+    # POST /cmd/format/result until {"code":0,"desc":"success"}. The previous
+    # GET /cmd/format/start was silently ignored by the camera.
     try:
-        r = await asyncio.to_thread(lambda: _cam_session.get(url, timeout=30))
-        return r.json()
+        start = await asyncio.to_thread(
+            lambda: _cam_session.post(f"{base}/cmd/format/start", json={}, timeout=10)
+        )
+        start_json = start.json()
+        if start_json.get("code") != 0:
+            raise HTTPException(503, f"format/start returned {start_json}")
+        # Poll for completion (format is quick, but give it a few seconds).
+        for _ in range(15):
+            await asyncio.sleep(1)
+            res = await asyncio.to_thread(
+                lambda: _cam_session.post(f"{base}/cmd/format/result", json={}, timeout=10)
+            )
+            try:
+                res_json = res.json()
+            except Exception:
+                continue
+            if res_json.get("code") == 0 and res_json.get("desc"):
+                return res_json
+        return {"code": 0, "desc": "started", "note": "format result not confirmed within timeout"}
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(503, str(exc))
 

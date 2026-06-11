@@ -30,6 +30,7 @@ _DEFAULTS = {
     "temperature": 0.1,
     "alert_cooldown_minutes": 30,
     "alert_rules_enabled": {},  # {} = all rules enabled; {"person": False} to disable specific rules
+    "battery_warning_threshold": 25,  # % — first low-battery alert; re-alerts every 5% below
 }
 
 _KEYWORDS = [

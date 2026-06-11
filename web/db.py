@@ -5,6 +5,7 @@ Thumbs: ~/.gardepro/thumbs/{id}_{kind}.jpg
 Files:  ~/.gardepro/files/{id}_{kind}
 Saved:  ~/.gardepro/saved/{timestamp}_{id}_{kind}[_thumb].jpg
 """
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -252,3 +253,30 @@ class CacheDB:
             "SELECT value FROM meta WHERE key='last_synced'"
         ).fetchone()
         return row["value"] if row else None
+
+    def set_meta(self, key: str, value: str):
+        self._conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+            (key, value),
+        )
+
+    def get_meta(self, key: str) -> Optional[str]:
+        row = self._conn.execute(
+            "SELECT value FROM meta WHERE key=?", (key,)
+        ).fetchone()
+        return row["value"] if row else None
+
+    def set_battery(self, data: dict):
+        """Persist last-known power status (from /cmd/info/2) with a UTC timestamp."""
+        payload = dict(data)
+        payload["updated"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.set_meta("battery", json.dumps(payload))
+
+    def get_battery(self) -> Optional[dict]:
+        raw = self.get_meta("battery")
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except Exception:
+            return None

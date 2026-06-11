@@ -65,6 +65,23 @@ def _send_email(subject: str, plain: str, html: str = "", thumb_bytes: bytes = b
             s.send_message(msg)
 
 
+def send_battery_alert(pct: int, charging: bool = False) -> None:
+    """Send a low-battery alert (log always; email if configured).
+
+    Never raises — failures are logged so the caller's poll loop is unaffected.
+    """
+    state = " (on external power)" if charging else ""
+    logging.warning("GardePro battery alert: %d%%%s", pct, state)
+    subject = f"GardePro: battery low ({pct}%)"
+    body = (f"The trail camera battery is at {pct}%{state}.\n\n"
+            "Auto-sync is disabled at or below 10% to preserve power.")
+    try:
+        _send_email(subject, body)
+        logging.info("GardePro battery alert: email sent (%d%%)", pct)
+    except Exception as exc:
+        logging.error("GardePro battery alert: email failed — %s", exc)
+
+
 def send_test_email() -> None:
     """Send a test email to verify configuration. Raises on failure."""
     _send_email(

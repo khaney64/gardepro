@@ -81,6 +81,16 @@ header {
 .signal-badge.signal-fair      { color: #ffc107; }
 .signal-badge.signal-poor      { color: #f44336; }
 
+.battery-badge {
+  font-size: .75em; padding: 2px 7px; border-radius: 10px;
+  background: rgba(255,255,255,.1); white-space: nowrap; color: #ccc;
+}
+.battery-badge.battery-charging { color: #4caf50; }
+.battery-badge.battery-good     { color: #8bc34a; }
+.battery-badge.battery-mid      { color: #ffc107; }
+.battery-badge.battery-low      { color: #f44336; }
+.battery-badge.battery-stale    { opacity: .55; font-style: italic; }
+
 /* Desktop tab nav */
 .tab-nav { display: flex; gap: 4px; }
 .tab-btn {
