@@ -379,13 +379,14 @@ function renderGallery() {
   });
 }
 
-const _SUBJECT_PRIORITY = ['raccoon', 'bear', 'coyote', 'person', 'human', 'legs', 'fox', 'deer', 'cat', 'dog'];
+const _SUBJECT_PRIORITY = ['raccoon', 'bear', 'coyote', 'person', 'human', 'legs', 'fox', 'deer', 'cat', 'dog', 'cupcake', 'sox'];
 const _SUBJECT_LABELS = {
   raccoon: '🦝 raccoon', bear: '🐻 bear', coyote: '🐺 coyote',
   person: '🚶 person', human: '🚶 person', legs: '🚶 person',
   fox: '🦊 fox', deer: '🦌 deer', cat: '🐱 cat', dog: '🐶 dog',
   squirrel: '🐿 squirrel', rabbit: '🐇 rabbit', bird: '🐦 bird',
   skunk: '🦨 skunk', turkey: '🦃 turkey', possum: '🐾 possum',
+  cupcake: '🧁 Cupcake', sox: '🧦 Sox',
 };
 
 function topSubject(subjects) {

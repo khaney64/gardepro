@@ -37,6 +37,7 @@ _KEYWORDS = [
     "cat", "raccoon", "deer", "fox", "dog", "rabbit", "bird",
     "person", "human", "legs", "squirrel", "possum", "opossum",
     "skunk", "bear", "coyote", "turkey",
+    "cupcake", "sox",
 ]
 
 _session = requests.Session()
