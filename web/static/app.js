@@ -1159,7 +1159,7 @@ function updateOfflineBar() {
   const label = el('last-synced-label');
   if (S.lastSynced) {
     const diffMin = (Date.now() - new Date(S.lastSynced).getTime()) / 60000;
-    const stale = diffMin > 12;
+    const stale = diffMin > 20;
     const paused = S.autosyncPausedBattery;
     label.textContent = 'Last synced: ' + formatRelativeTime(S.lastSynced)
       + (paused ? ` — auto-sync paused (battery ${S.batteryPct ?? '?'}%)` : (stale ? ' ⚠' : ''));
