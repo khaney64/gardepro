@@ -581,6 +581,8 @@ async def _thumb_cache_loop():
                 await asyncio.to_thread(_db.mark_thumb_cached, id_, kind, str(dest))
             else:
                 await _log(f"Thumb {id_}/{kind}: camera returned {resp.status_code}")
+                if resp.status_code >= 400:
+                    await asyncio.to_thread(_db.mark_thumb_cached, id_, kind, None)
         except Exception as exc:
             await _log(f"Thumb {id_}/{kind}: download failed — {exc}")
         if (i + 1) % 10 == 0 or i + 1 == total:
