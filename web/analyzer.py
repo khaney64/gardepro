@@ -4,6 +4,7 @@ import base64
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -65,15 +66,19 @@ def save_config(cfg: dict) -> dict:
     return merged
 
 
-def _parse_subjects(text: str) -> list[str]:
+def _parse_subjects(text: str) -> tuple[list[str], dict[str, int]]:
     lower = text.lower()
     found = []
+    confidence: dict[str, int] = {}
     for kw in _KEYWORDS:
         if kw in lower and kw not in found:
             found.append(kw)
+            m = re.search(rf'\b{re.escape(kw)}\b[^\[]*\[([0-5])\]', lower)
+            confidence[kw] = int(m.group(1)) if m else 0
     if "opossum" in found and "possum" not in found:
         found.append("possum")
-    return found
+        confidence["possum"] = confidence.get("opossum", 0)
+    return found, confidence
 
 
 def _call_local(thumb_path: str, cfg: dict) -> dict:
@@ -104,7 +109,8 @@ def _call_local(thumb_path: str, cfg: dict) -> dict:
     resp = _session.post(f"{url}/v1/chat/completions", json=payload, timeout=(5, 90))
     resp.raise_for_status()
     text = resp.json()["choices"][0]["message"]["content"] or ""
-    return {"subjects": _parse_subjects(text), "description": text.strip(), "engine": f"Local ({cfg['llm_model']})"}
+    subjects, confidence = _parse_subjects(text)
+    return {"subjects": subjects, "subject_confidence": confidence, "description": text.strip(), "engine": f"Local ({cfg['llm_model']})"}
 
 
 def _call_anthropic(thumb_path: str, cfg: dict) -> dict:
@@ -147,7 +153,8 @@ def _call_anthropic(thumb_path: str, cfg: dict) -> dict:
     # With thinking enabled the content array may start with a thinking block; find the text block.
     content_blocks = resp.json()["content"]
     text = next((b["text"] for b in content_blocks if b.get("type") == "text"), "")
-    return {"subjects": _parse_subjects(text), "description": text.strip(), "engine": f"Anthropic ({cfg['anthropic_model']})"}
+    subjects, confidence = _parse_subjects(text)
+    return {"subjects": subjects, "subject_confidence": confidence, "description": text.strip(), "engine": f"Anthropic ({cfg['anthropic_model']})"}
 
 
 def _call(thumb_path: str, cfg: dict) -> dict:
@@ -248,6 +255,18 @@ async def analyze_image(thumb_path: str, config: Optional[dict] = None) -> dict:
                 _log.info("analysis retry succeeded (thinking_budget=%d)", budget)
             else:
                 _log.warning("analysis retry also returned empty (thinking_budget=%d)", budget)
+        if (not result.get("error")
+                and result.get("subjects")
+                and all(v <= 3 for v in result.get("subject_confidence", {}).values())
+                and int(cfg.get("thinking_budget", 0)) > 0):
+            budget = int(cfg["thinking_budget"]) * 2
+            _log.warning("analysis low-confidence — retrying with thinking_budget=%d", budget)
+            retry_cfg = {**cfg, "thinking_budget": budget}
+            result = await asyncio.to_thread(_call, thumb_path, retry_cfg)
+            if any(v > 3 for v in result.get("subject_confidence", {}).values()):
+                _log.info("analysis confidence retry succeeded (thinking_budget=%d)", budget)
+            else:
+                _log.warning("analysis confidence retry still low (thinking_budget=%d)", budget)
         return result
     except Exception as exc:
         return {"subjects": [], "description": "", "error": str(exc)}

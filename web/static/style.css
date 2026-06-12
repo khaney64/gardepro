@@ -392,18 +392,26 @@ header {
   .toolbar-center  { order: 3; width: 100%; justify-content: center; }
 
   /* Slightly smaller grid on very narrow screens */
-  .gallery-grid { grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 4px; padding: 6px; }
+  .gallery-grid { grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 6px; }
 
   /* Full-screen lightbox arrows */
   .lb-arrow { font-size: 2em; }
+}
+
+@media (max-width: 480px) {
+  .gallery-grid { grid-template-columns: repeat(2, 1fr); }
 }
 
 @media (min-width: 641px) and (max-width: 1024px) {
   .gallery-grid { grid-template-columns: repeat(4, 1fr); }
 }
 
+@media (max-width: 960px) and (orientation: landscape) {
+  .gallery-grid { grid-template-columns: repeat(3, 1fr); }
+}
+
 @media (min-width: 1025px) {
-  .gallery-grid { grid-template-columns: repeat(6, 1fr); }
+  .gallery-grid { grid-template-columns: repeat(5, 1fr); }
 }
 
 /* Safe-area padding for notched phones */

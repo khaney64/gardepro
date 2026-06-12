@@ -30,6 +30,7 @@ import asyncio
 import collections
 import datetime
 from email.utils import parsedate_to_datetime
+from zoneinfo import ZoneInfo
 import json
 import os
 import re
@@ -189,7 +190,7 @@ async def _broadcast(data: dict):
 
 
 def _log_sync(msg: str) -> dict:
-    ts = datetime.datetime.now().strftime("%H:%M:%S")
+    ts = datetime.datetime.now(ZoneInfo("America/New_York")).strftime("%H:%M:%S")
     entry = {"ts": ts, "msg": msg}
     _log_entries.append(entry)
     print(f"[{ts}] {msg}", flush=True)
@@ -202,7 +203,7 @@ async def _log(msg: str):
 
 
 async def _log_alert_error(msg: str):
-    ts = datetime.datetime.now().strftime("%H:%M:%S")
+    ts = datetime.datetime.now(ZoneInfo("America/New_York")).strftime("%H:%M:%S")
     entry = {"ts": ts, "msg": msg}
     _log_entries.append({**entry, "level": "error"})
     print(f"[{ts}] ALERT ERROR: {msg}", flush=True)
@@ -621,7 +622,8 @@ async def _analysis_loop():
         if result.get("error"):
             await _log(f"Analysis: [{kind.upper()} {id_}] error — {result['error']}")
         else:
-            subj_str = ', '.join(subjects) if subjects else 'nothing detected'
+            conf = result.get('subject_confidence', {})
+            subj_str = ', '.join(f"{s} [{conf[s]}]" if s in conf else s for s in subjects) if subjects else 'nothing detected'
             snippet  = result.get('description', '').replace('\n', ' ')[:200]
             engine   = result.get('engine', '')
             await _log(f"Analysis: [{kind.upper()} {id_}] {subj_str} | {snippet}" + (f" [{engine}]" if engine else ""))
@@ -1375,18 +1377,6 @@ async def api_analysis_run(media_id: int, kind: str):
         snippet  = result.get('description', '').replace('\n', ' ')[:200]
         engine   = result.get('engine', '')
         await _log(f"Analysis: [{kind_lower.upper()} {media_id}] {subj_str} | {snippet}" + (f" [{engine}]" if engine else ""))
-    if _alert_rules and subjects and _analysis_config.get("alerts_enabled", False):
-        pi_host = f"{_get_pi_ip()}:8080"
-        rules = _enabled_alert_rules()
-        cooldown = float(_analysis_config.get("alert_cooldown_minutes", 30)) * 60
-        triggered, alert_errors = await asyncio.to_thread(
-            alerter.check_and_alert, result, media_id, kind_lower, rules, pi_host, cooldown, str(cached),
-            _alert_rules
-        )
-        if triggered:
-            await _log(f"Analysis: alert triggered — {', '.join(triggered)} (media {media_id}/{kind_lower})")
-        for err in alert_errors:
-            await _log_alert_error(err)
     return {"id": media_id, "kind": kind_lower, **result}
 
 

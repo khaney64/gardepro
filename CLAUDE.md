@@ -41,6 +41,7 @@ FastAPI app with a single shared `_state` dict that drives all UI updates. Key p
 - Auto-sync loop (`GARDEPRO_AUTO_CONNECT=1`): connect → enumerate → cache thumbs → analyze → disconnect, with `AUTO_SYNC_RETRIES=2`. Auto-sync is **paused** when the last-known battery level is at or below `BATTERY_AUTOSYNC_DISABLE_PCT` (default 10%) to preserve power; manual connect still works.
 - **Thumb cache error handling** (`_thumb_cache_loop`): a 4xx/5xx response from the camera (e.g. HTTP 500 for a corrupt/missing file) permanently marks `thumb_cached=1` with no path, preventing infinite retry on every sync. The gallery shows no thumbnail for that item.
 - **Battery monitoring** (`_battery_poll_loop`): polls `GET /cmd/info/2` every 60 s while connected; broadcasts `{"type":"battery","pct","mv","temp","ext_power","updated"}` over SSE and persists the reading to the DB (`set_battery`) so it shows in the UI badge while disconnected. `_evaluate_battery_alerts()` fires `alerter.send_battery_alert()` when crossing `battery_warning_threshold` (default 25%) and every 5% below that; resets on recovery. BLE connect/ops/disconnect all have hard `asyncio.wait_for` timeouts (`BLE_CONNECT_TIMEOUT=20s`, `BLE_OP_TIMEOUT=10s`, `BLE_DISCONNECT_TIMEOUT=5s`) to prevent BlueZ from wedging the connect flow.
+- **Log timestamps** (`_log_sync`, `_log_alert_error`): displayed in US Eastern time (`America/New_York` via `zoneinfo`) — automatically tracks EST/EDT.
 
 ### Cache layer (`web/db.py`)
 SQLite at `~/.gardepro/cache.db`. Three tables: `media` (camera index + analysis), `saved_media` (Pi-local copies), `meta` (last_synced timestamp + last-known battery JSON). Schema migrates forward with `ALTER TABLE ... ADD COLUMN` try/except. The `upsert_media()` method detects ID reuse after on-camera deletion by comparing `captured_at` timestamps and resets all cache flags. `set_battery()`/`get_battery()` persist the last-known power status via the `meta` table so it survives restarts.
@@ -54,13 +55,21 @@ Two backends selectable at runtime:
 
 Config persisted at `~/.gardepro/analysis_config.json`. Subject detection is keyword-matching over LLM text output (`_KEYWORDS` list).
 
-**Thinking budget retry:** When a model exhausts its thinking budget it can return a response with no text — the Anthropic path returns `""` via `next(..., "")` and the local path guards against a `None` content field with `or ""`. Both `analyze_image()` and `chat_image()` detect an empty `description` after a successful call and retry once with `thinking_budget * 2`. Retries are logged as WARNING/INFO via Python's `logging` module (visible in `journalctl`).
+**Confidence scores:** The LLM prompt instructs the model to append a confidence level after each detected subject in the form `subject [N]` where N is 0 (lowest) to 5 (highest). `_parse_subjects()` extracts these and returns `(subjects: list[str], confidence: dict[str, int])`; callers add `subject_confidence` to the result dict. Missing or unparseable markers default to 0. Confidence is logged alongside detections in `_analysis_loop` (e.g. `deer [3], fox [0]`).
+
+**Thinking budget retries:** `analyze_image()` has two retry triggers, each doubling `thinking_budget`:
+1. **Empty response** — model returned no text at all (budget exhausted).
+2. **Low confidence** — subjects were detected but all have confidence ≤ 3 (including the 0 default for missing markers). Retries are logged as WARNING/INFO via Python's `logging` module (visible in `journalctl`). `chat_image()` only has the empty-response retry (no subject detection).
 
 ### Alert engine (`web/alerter.py`)
 Rules loaded from `~/.gardepro/alerts.yaml` at startup. Each rule has `name`, `keywords`, `action` (log|email), optional `catch_all: true`. Dedup: `_fired` set prevents re-alerting the same image; `_last_fired` dict enforces per-rule cooldown. Email sends inline thumbnail via CID attachment.
 
+**Alert scope:** `alerter.check_and_alert()` is called only from `_analysis_loop()` (auto-sync path). Manual re-analysis via `POST /api/analysis/run/{id}/{kind}` and chat endpoints do **not** trigger alerts.
+
 ### Frontend (`web/static/`)
-Vanilla HTML/JS/CSS — no build step. Connects to SSE stream on load; dispatches on `type` field (`state`, `log`, `media_progress`, `cache_progress`, `analysis_update`, `signal`, `media_deleted`). No framework or bundler.
+Vanilla HTML/JS/CSS — no build step. Connects to SSE stream on load; dispatches on `type` field (`state`, `log`, `media_progress`, `cache_progress`, `analysis_update`, `signal`, `media_deleted`). No framework or bundler. Bump `?v=N` on the `style.css` and `app.js` `<link>`/`<script>` tags in `index.html` whenever those files change.
+
+**Gallery grid columns:** desktop ≥1025px → 5; tablet 641–1024px → 4; phone landscape ≤960px → 3; phone portrait ≤480px → 2.
 
 ## Key environment variables
 
