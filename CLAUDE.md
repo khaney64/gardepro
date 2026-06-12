@@ -12,6 +12,8 @@ journalctl -u gardepro -f
 ```
 Credentials live in `/etc/gardepro.env`. Web UI at `http://<pi-ip>:8080`.
 
+**Pi maintenance note:** Unattended-upgrades automatic reboots are disabled (`Unattended-Upgrade::Automatic-Reboot "false"` in `/etc/apt/apt.conf.d/50unattended-upgrades`). An automatic reboot after a routine package upgrade previously caused a ~6.5 hour outage when the Pi failed to come back cleanly. Apply reboots manually after verifying the upgrade.
+
 **Manual:**
 ```bash
 cd web
@@ -28,6 +30,7 @@ Imported directly by `web/server.py` via `sys.path` manipulation. Provides:
 - `find_device()` — BLE scan for the camera
 - `linux_connect_wifi()` / `linux_disconnect_wifi()` / `linux_wait_for_ip()` — nmcli-based WiFi management
 - Wake sequence: writes `AT+WAKEPULSE=10\r\n` to BLE char `6e400004`; camera opens WiFi hotspot SSID `CAM8Z8_<MAC>`
+- `linux_wait_for_ip()` calls `dhcpcd -1 --noarp`. The `--noarp` flag skips dhcpcd's ARP conflict probe, which the camera's AP was causing to fail ~50% of the time (probe timeout → fallback to 169.254.x.x link-local → DHCP reported as failed). The 192.168.8.x network is isolated so ARP conflict detection has no value.
 
 ### Backend (`web/server.py`)
 FastAPI app with a single shared `_state` dict that drives all UI updates. Key patterns:
@@ -36,6 +39,7 @@ FastAPI app with a single shared `_state` dict that drives all UI updates. Key p
 - Connection lifecycle: `_connection_flow()` → background tasks (keepalive, signal poll, thumb cache, analysis) → `_disconnect_flow()`
 - Media enumeration uses `GET /list/detail/backward/{ts}/{count}` (native listing endpoint, same as the official app). Response: `{"code":0,"data":[{"id":N,"type":1|2,"date":"YYYY-MM-DD HH:MM:SS",...}]}` — type 1=jpg, type 2=mp4. Paging: `{ts}` is an **item id** (not epoch); pass `min(id)` from the current page as `{ts}` for the next call. End of card: empty `data` array. Falls back to the old sequential `/file/{id}/JPG` probe (`_enumerate_media_probe`) if the listing call fails or returns an unexpected schema.
 - Auto-sync loop (`GARDEPRO_AUTO_CONNECT=1`): connect → enumerate → cache thumbs → analyze → disconnect, with `AUTO_SYNC_RETRIES=2`. Auto-sync is **paused** when the last-known battery level is at or below `BATTERY_AUTOSYNC_DISABLE_PCT` (default 10%) to preserve power; manual connect still works.
+- **Thumb cache error handling** (`_thumb_cache_loop`): a 4xx/5xx response from the camera (e.g. HTTP 500 for a corrupt/missing file) permanently marks `thumb_cached=1` with no path, preventing infinite retry on every sync. The gallery shows no thumbnail for that item.
 - **Battery monitoring** (`_battery_poll_loop`): polls `GET /cmd/info/2` every 60 s while connected; broadcasts `{"type":"battery","pct","mv","temp","ext_power","updated"}` over SSE and persists the reading to the DB (`set_battery`) so it shows in the UI badge while disconnected. `_evaluate_battery_alerts()` fires `alerter.send_battery_alert()` when crossing `battery_warning_threshold` (default 25%) and every 5% below that; resets on recovery. BLE connect/ops/disconnect all have hard `asyncio.wait_for` timeouts (`BLE_CONNECT_TIMEOUT=20s`, `BLE_OP_TIMEOUT=10s`, `BLE_DISCONNECT_TIMEOUT=5s`) to prevent BlueZ from wedging the connect flow.
 
 ### Cache layer (`web/db.py`)
