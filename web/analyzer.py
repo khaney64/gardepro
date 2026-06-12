@@ -92,9 +92,9 @@ def _call_local(thumb_path: str, cfg: dict) -> dict:
             {
                 "role": "user",
                 "content": [
+                    {"type": "text", "text": cfg["prompt"]},
                     {"type": "image_url",
                      "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                    {"type": "text", "text": cfg["prompt"]},
                 ],
             }
         ],
@@ -127,12 +127,12 @@ def _call_anthropic(thumb_path: str, cfg: dict) -> dict:
             {
                 "role": "user",
                 "content": [
+                    {"type": "text", "text": cfg["prompt"]},
                     {"type": "image", "source": {
                         "type": "base64",
                         "media_type": "image/jpeg",
                         "data": b64,
                     }},
-                    {"type": "text", "text": cfg["prompt"]},
                 ],
             }
         ],
@@ -174,8 +174,8 @@ def _call_raw(thumb_path: str, cfg: dict) -> dict:
             "model": cfg["anthropic_model"],
             "max_tokens": int(cfg["max_tokens"]) + thinking_budget,
             "messages": [{"role": "user", "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
                 {"type": "text", "text": cfg["prompt"]},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
             ]}],
         }
         if thinking_budget > 0:
@@ -195,8 +195,8 @@ def _call_raw(thumb_path: str, cfg: dict) -> dict:
         payload = {
             "model": cfg["llm_model"],
             "messages": [{"role": "user", "content": [
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
                 {"type": "text", "text": cfg["prompt"]},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
             ]}],
             "max_tokens": int(cfg["max_tokens"]) + thinking_budget,
             "temperature": float(cfg["temperature"]),
