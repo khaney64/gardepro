@@ -534,6 +534,7 @@ async def _enumerate_media() -> list[dict]:
         await _log("Media scan returned no results — preserving cached gallery")
         return results
 
+    results.sort(key=lambda x: x["id"])
     _media = results
     _state["media_count"] = len(results)
 
