@@ -629,7 +629,7 @@ def linux_wait_for_ip(iface, timeout=20):
         pass
     try:
         subprocess.run(
-            ["sudo", "dhcpcd", "-1", iface],
+            ["sudo", "dhcpcd", "-1", "--noarp", iface],
             timeout=timeout + 5, capture_output=True
         )
     except subprocess.TimeoutExpired:
