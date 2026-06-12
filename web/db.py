@@ -84,8 +84,9 @@ class CacheDB:
 
     def get_all_media(self) -> list[dict]:
         rows = self._conn.execute(
-            "SELECT id, kind, thumb_cached, thumb_path FROM media"
-            " WHERE pending_delete=0 ORDER BY id"
+            "SELECT id, kind, captured_at, thumb_cached, thumb_path FROM media"
+            " WHERE pending_delete=0"
+            " ORDER BY coalesce(captured_at,'') ASC, id ASC"
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -160,6 +161,15 @@ class CacheDB:
             if row["thumb_path"]: Path(row["thumb_path"]).unlink(missing_ok=True)
             if row["file_path"]:  Path(row["file_path"]).unlink(missing_ok=True)
         self._conn.execute("DELETE FROM media WHERE id=? AND kind=?", (id, kind))
+
+    def clear_all_media(self):
+        """Wipe all camera media rows and reset the scan HWM (called after SD format)."""
+        rows = self._conn.execute("SELECT thumb_path, file_path FROM media").fetchall()
+        for row in rows:
+            if row["thumb_path"]: Path(row["thumb_path"]).unlink(missing_ok=True)
+            if row["file_path"]:  Path(row["file_path"]).unlink(missing_ok=True)
+        self._conn.execute("DELETE FROM media")
+        self._conn.execute("DELETE FROM meta WHERE key='scan_hwm'")
 
     def mark_for_deletion(self, id: int, kind: str):
         self._conn.execute(

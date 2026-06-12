@@ -534,7 +534,7 @@ async def _enumerate_media() -> list[dict]:
         await _log("Media scan returned no results — preserving cached gallery")
         return results
 
-    results.sort(key=lambda x: x["id"])
+    results.sort(key=lambda x: (x.get("captured_at") or "", x["id"]))
     _media = results
     _state["media_count"] = len(results)
 
@@ -873,7 +873,7 @@ async def _connection_flow(skip_ble_wake: bool = False):
     except asyncio.CancelledError:
         await _log("Connection cancelled")
         all_rows = await asyncio.to_thread(_db.get_all_media)
-        _media[:] = [{"id": r["id"], "kind": r["kind"]} for r in all_rows]
+        _media[:] = [{"id": r["id"], "kind": r["kind"], "captured_at": r.get("captured_at")} for r in all_rows]
         _state.update({
             "status": "disconnected", "step": "", "error": "Cancelled",
             "media_count": len(_media), "last_synced": _db.get_last_synced(),
@@ -898,7 +898,7 @@ async def _connection_flow(skip_ble_wake: bool = False):
     except Exception as exc:
         await _log(f"Connection failed: {exc}")
         all_rows = await asyncio.to_thread(_db.get_all_media)
-        _media[:] = [{"id": r["id"], "kind": r["kind"]} for r in all_rows]
+        _media[:] = [{"id": r["id"], "kind": r["kind"], "captured_at": r.get("captured_at")} for r in all_rows]
         _state.update({
             "status": "disconnected", "step": "", "error": str(exc),
             "media_count": len(_media), "last_synced": _db.get_last_synced(),
@@ -947,7 +947,7 @@ async def _disconnect_flow():
     await asyncio.to_thread(linux_disconnect_wifi, iface)
 
     all_rows = await asyncio.to_thread(_db.get_all_media)
-    _media[:] = [{"id": r["id"], "kind": r["kind"]} for r in all_rows]
+    _media[:] = [{"id": r["id"], "kind": r["kind"], "captured_at": r.get("captured_at")} for r in all_rows]
     _state.update({
         "status": "disconnected", "step": "", "camera_ip": None,
         "my_ip": None, "signal_dbm": None, "signal_label": None,
@@ -970,7 +970,7 @@ async def _resume_session(iface: str, my_ip: str):
     async def _restore_cached(error: str = ""):
         """Fall back to cached gallery and disconnect WiFi."""
         all_rows = await asyncio.to_thread(_db.get_all_media)
-        _media[:] = [{"id": r["id"], "kind": r["kind"]} for r in all_rows]
+        _media[:] = [{"id": r["id"], "kind": r["kind"], "captured_at": r.get("captured_at")} for r in all_rows]
         _state.update({
             "status": "disconnected", "step": "", "error": error or None,
             "media_count": len(_media),
@@ -1031,7 +1031,7 @@ async def lifespan(app: FastAPI):
         _log_sync(f"Loaded {len(_alert_rules)} alert rule(s) from ~/.gardepro/alerts.yaml")
     all_rows = await asyncio.to_thread(_db.get_all_media)
     if all_rows:
-        _media = [{"id": r["id"], "kind": r["kind"]} for r in all_rows]
+        _media = [{"id": r["id"], "kind": r["kind"], "captured_at": r.get("captured_at")} for r in all_rows]
         _state["media_count"] = len(_media)
         _state["last_synced"] = _db.get_last_synced()
         _state["last_event"]  = _db.get_last_event_time()
@@ -1647,6 +1647,10 @@ async def api_format(body: dict):
             except Exception:
                 continue
             if res_json.get("code") == 0 and res_json.get("desc"):
+                await asyncio.to_thread(_db.clear_all_media)
+                _media.clear()
+                _state["media_count"] = 0
+                await _broadcast(_broadcast_state())
                 return res_json
         return {"code": 0, "desc": "started", "note": "format result not confirmed within timeout"}
     except HTTPException:
