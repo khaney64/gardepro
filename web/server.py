@@ -711,8 +711,9 @@ async def _auto_sync_loop():
                         await _thumb_cache_task
                     except Exception:
                         pass
-                await _analysis_loop()
                 await _disconnect_flow()
+                await _log("Auto-sync: camera disconnected — running analysis on cached thumbs")
+                await _analysis_loop()
                 await _log("Auto-sync: completed successfully")
             else:
                 # All attempts exhausted — wait a full interval before retrying
