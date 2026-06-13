@@ -110,7 +110,7 @@ def check_and_alert(
     errors      = []
     now         = time.time()
 
-    # Read thumbnail once for use in all email alerts
+    # Read thumbnail once for use in email alerts
     thumb_bytes = b""
     if thumb_path:
         p = Path(thumb_path)
@@ -124,66 +124,89 @@ def check_and_alert(
         if not rule.get("catch_all"):
             specific_keywords.update(k.lower() for k in (rule.get("keywords") or []))
 
-    def _fire(name: str, action: str, matched_subjects: list[str]) -> None:
+    thumb_url = f"http://{pi_host}/api/thumb/{media_id}/{kind}"
+
+    # First pass: determine which rules would fire (dedup + cooldown checks)
+    email_triggers: list[tuple[str, list[str]]] = []  # (rule_name, matched_subjects)
+    log_triggers:   list[tuple[str, list[str]]] = []
+
+    for rule in rules:
+        name   = rule.get("name", "unknown")
+        action = rule.get("action", "log")
+
+        if rule.get("catch_all"):
+            unmatched = [s for s in subjects if s not in specific_keywords]
+            if not unmatched:
+                continue
+            matched_subjects = unmatched
+        else:
+            keywords = [k.lower() for k in (rule.get("keywords") or [])]
+            if not keywords:
+                continue
+            if not any(kw in subjects or kw in description for kw in keywords):
+                continue
+            matched_subjects = [kw for kw in keywords if kw in subjects]
+
         dedup_key = (media_id, kind, name)
         if dedup_key in _fired:
-            return
+            continue
         if cooldown_seconds > 0 and now - _last_fired.get(name, 0) < cooldown_seconds:
             remaining = int(cooldown_seconds - (now - _last_fired[name]))
             logging.info("GardePro alert [%s]: suppressed (cooldown %ds remaining) for media %s/%s",
                          name, remaining, media_id, kind)
-            return
+            continue
+
+        if action == "email":
+            email_triggers.append((name, matched_subjects))
+        else:
+            log_triggers.append((name, matched_subjects))
+
+    # Fire log alerts
+    for name, matched_subjects in log_triggers:
         _last_fired[name] = now
         triggered.append(name)
-        thumb_url = f"http://{pi_host}/api/thumb/{media_id}/{kind}"
-        if action == "email":
-            detected = ", ".join(matched_subjects) if matched_subjects else analysis.get("description", "")
-            subj = f"GardePro alert: {detected} detected"
-            plain = (
-                f"Detection: {detected}\n"
-                f"Thumbnail: {thumb_url}\n\n"
-                f"Analysis:\n{analysis.get('description', '')}"
-            )
-            img_tag = '<img src="cid:thumb" style="max-width:100%;border-radius:4px">' if thumb_bytes else \
-                      f'<a href="{thumb_url}">View thumbnail</a>'
-            html = f"""\
+        _fired.add((media_id, kind, name))
+        logging.info("GardePro alert [%s]: media %s/%s — %s", name, media_id, kind, thumb_url)
+
+    # Send one consolidated email for all email triggers
+    if email_triggers:
+        # Collect unique matched subjects across all triggered rules, preserving order
+        seen_subjects: set[str] = set()
+        all_subjects: list[str] = []
+        for _, matched in email_triggers:
+            for s in matched:
+                if s not in seen_subjects:
+                    all_subjects.append(s)
+                    seen_subjects.add(s)
+
+        all_names = [name for name, _ in email_triggers]
+        detected  = ", ".join(all_subjects) if all_subjects else analysis.get("description", "")
+        subj      = f"GardePro alert: {detected} detected"
+        plain = (
+            f"Detection: {detected}\n"
+            f"Thumbnail: {thumb_url}\n\n"
+            f"Analysis:\n{analysis.get('description', '')}"
+        )
+        img_tag = '<img src="cid:thumb" style="max-width:100%;border-radius:4px">' if thumb_bytes else \
+                  f'<a href="{thumb_url}">View thumbnail</a>'
+        html = f"""\
 <html><body style="font-family:sans-serif;max-width:600px">
 <h2 style="margin-bottom:4px">GardePro alert: {detected}</h2>
 <p style="margin-top:0;color:#666">{detected}</p>
 {img_tag}
 <p style="color:#888;font-size:0.85em">{analysis.get('description', '')}</p>
 </body></html>"""
-            try:
-                _send_email(subj, plain, html, thumb_bytes)
-                _fired.add(dedup_key)
-                logging.info("GardePro alert [%s]: email sent for media %s/%s", name, media_id, kind)
-            except Exception as exc:
-                err = f"Alert [{name}]: email failed — {exc}"
-                logging.warning("GardePro %s", err)
-                errors.append(err)
-        else:
-            _fired.add(dedup_key)
-            logging.info("GardePro alert [%s]: media %s/%s — %s", name, media_id, kind, thumb_url)
-
-    for rule in rules:
-        name     = rule.get("name", "unknown")
-        action   = rule.get("action", "log")
-
-        if rule.get("catch_all"):
-            # Fire for any subjects not covered by a specific keyword rule
-            unmatched = [s for s in subjects if s not in specific_keywords]
-            if unmatched:
-                _fire(name, action, unmatched)
-            continue
-
-        keywords = [k.lower() for k in (rule.get("keywords") or [])]
-        if not keywords:
-            continue
-
-        matched = any(kw in subjects or kw in description for kw in keywords)
-        if not matched:
-            continue
-
-        _fire(name, action, [kw for kw in keywords if kw in subjects])
+        try:
+            _send_email(subj, plain, html, thumb_bytes)
+            for name, _ in email_triggers:
+                _last_fired[name] = now
+                triggered.append(name)
+                _fired.add((media_id, kind, name))
+            logging.info("GardePro alert [%s]: email sent for media %s/%s",
+                         ", ".join(all_names), media_id, kind)
+        except Exception as exc:
+            err = f"Alert [{', '.join(all_names)}]: email failed — {exc}"
+            logging.warning("GardePro %s", err)
+            errors.append(err)
 
     return triggered, errors
