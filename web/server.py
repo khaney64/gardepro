@@ -540,10 +540,15 @@ async def _enumerate_media() -> list[dict]:
     _state["media_count"] = len(results)
 
     def _sync_to_db(items):
+        camera_keys = {(item["id"], item["kind"]) for item in items}
         for item in items:
             _db.upsert_media(item["id"], item["kind"], item.get("captured_at"))
         if items:
             _db.set_scan_hwm(max(item["id"] for item in items))
+        # Purge DB rows no longer present on camera (deleted or card formatted)
+        for row in _db.get_all_media():
+            if (row["id"], row["kind"]) not in camera_keys:
+                _db.delete_media(row["id"], row["kind"])
         pending_ids = {(r["id"], r["kind"]) for r in _db.get_pending_deletions()}
         _db.set_last_synced()
         _state["last_synced"] = _db.get_last_synced()
