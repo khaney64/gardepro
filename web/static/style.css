@@ -520,6 +520,9 @@ header {
   padding: 12px 14px; font-size: .88em; white-space: pre-wrap;
   max-height: 300px; overflow-y: auto; line-height: 1.5;
 }
+.chat-detection { margin-bottom: 8px; white-space: normal; }
+.chat-detection:last-child { margin-bottom: 0; }
+.chat-reasoning { font-size: .9em; color: #555; margin-top: 3px; }
 
 /* ── Logs tab ── */
 .logs-panel { display: flex; flex-direction: column; }

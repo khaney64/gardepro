@@ -1317,21 +1317,23 @@ async def api_analysis_chat_saved(saved_id: int, body: dict):
     thumb = item.get("thumb_path") or ""
     if not thumb or not Path(thumb).exists():
         raise HTTPException(404, "Thumbnail not found")
-    result = await analyzer.chat_image(thumb, body.get("prompt", ""), _analysis_config)
-    return {"response": result.get("description", ""), "error": result.get("error")}
+    prompt = (body.get("prompt", "") or "").rstrip() + "\nInclude your reasoning."
+    result = await analyzer.chat_image(thumb, prompt, _analysis_config)
+    return {"response": result.get("description", ""), "detections": result.get("detections", []), "error": result.get("error")}
 
 
 @app.post("/api/analysis/chat/{media_id}/{kind}")
 async def api_analysis_chat(media_id: int, kind: str, body: dict):
     """One-shot chat about a gallery media item. Response is throwaway — no tag updates."""
-    prompt = body.get("prompt", "")
+    prompt = (body.get("prompt", "") or "").rstrip()
     if not prompt:
         raise HTTPException(400, "prompt required")
+    prompt += "\nInclude your reasoning."
     cached = THUMB_DIR / f"{media_id}_{kind.lower()}.jpg"
     if not cached.exists():
         raise HTTPException(404, "Thumbnail not cached — connect to camera first")
     result = await analyzer.chat_image(str(cached), prompt, _analysis_config)
-    return {"response": result.get("description", ""), "error": result.get("error")}
+    return {"response": result.get("description", ""), "detections": result.get("detections", []), "error": result.get("error")}
 
 
 @app.post("/api/analysis/run/saved/{saved_id}")

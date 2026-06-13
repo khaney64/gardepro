@@ -830,10 +830,22 @@ async function submitChat() {
     });
     const d = await r.json().catch(() => ({}));
     el('chat-status').textContent = '';
-    el('chat-response').textContent = (!r.ok || d.error)
-      ? `Error: ${d.error || d.detail || r.status}`
-      : (d.response || '(no response)');
-    el('chat-response').classList.remove('hidden');
+    const resp = el('chat-response');
+    if (!r.ok || d.error) {
+      resp.textContent = `Error: ${d.error || d.detail || r.status}`;
+    } else if (d.detections && d.detections.length) {
+      resp.innerHTML = d.detections.map(det => {
+        const label  = (det.label || '').toLowerCase();
+        const name   = det.name  ? ` — ${det.name}` : '';
+        const conf   = det.confidence != null ? ` [${det.confidence}]` : '';
+        const reason = det.reasoning
+          ? `<div class="chat-reasoning">${det.reasoning}</div>` : '';
+        return `<div class="chat-detection"><strong>${label}${name}</strong>${conf}${reason}</div>`;
+      }).join('');
+    } else {
+      resp.textContent = d.response || '(no response)';
+    }
+    resp.classList.remove('hidden');
   } catch (e) {
     el('chat-status').textContent = '';
     el('chat-response').textContent = `Error: ${e.message}`;

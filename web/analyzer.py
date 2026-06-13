@@ -66,7 +66,8 @@ def save_config(cfg: dict) -> dict:
     return merged
 
 
-def _parse_subjects(text: str) -> tuple[list[str], dict[str, int]]:
+def _parse_subjects_text(text: str) -> tuple[list[str], dict[str, int]]:
+    """Fallback: keyword scan + optional [N] confidence from free-text LLM output."""
     lower = text.lower()
     found = []
     confidence: dict[str, int] = {}
@@ -79,6 +80,47 @@ def _parse_subjects(text: str) -> tuple[list[str], dict[str, int]]:
         found.append("possum")
         confidence["possum"] = confidence.get("opossum", 0)
     return found, confidence
+
+
+def _parse_detections(text: str) -> dict:
+    """Parse JSON detection response. Falls back to keyword scan on non-JSON output."""
+    text = text.strip()
+    json_text = text
+    if "```" in text:
+        m = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
+        if m:
+            json_text = m.group(1)
+    try:
+        data = json.loads(json_text)
+        detections = data.get("detections", [])
+        subjects: list[str] = []
+        confidence: dict[str, int] = {}
+        for det in detections:
+            label = (det.get("label") or "").lower().strip()
+            name  = (det.get("name")  or "").lower().strip()
+            conf  = int(det.get("confidence", 0))
+            if label and label not in subjects:
+                subjects.append(label)
+                confidence[label] = conf
+            if name and name not in subjects:
+                subjects.append(name)
+                confidence[name] = conf
+        if "opossum" in subjects and "possum" not in subjects:
+            subjects.append("possum")
+            confidence["possum"] = confidence.get("opossum", 0)
+        parts = []
+        for det in detections:
+            label = (det.get("label") or "").lower()
+            name  = det.get("name")
+            conf  = det.get("confidence", 0)
+            parts.append(f"{label}{' (' + name + ')' if name else ''} [{conf}]")
+        description = ", ".join(parts) if parts else "nothing detected"
+        return {"subjects": subjects, "subject_confidence": confidence,
+                "detections": detections, "description": description}
+    except (json.JSONDecodeError, ValueError):
+        subjects, confidence = _parse_subjects_text(text)
+        return {"subjects": subjects, "subject_confidence": confidence,
+                "detections": [], "description": text}
 
 
 def _call_local(thumb_path: str, cfg: dict) -> dict:
@@ -109,8 +151,7 @@ def _call_local(thumb_path: str, cfg: dict) -> dict:
     resp = _session.post(f"{url}/v1/chat/completions", json=payload, timeout=(5, 90))
     resp.raise_for_status()
     text = resp.json()["choices"][0]["message"]["content"] or ""
-    subjects, confidence = _parse_subjects(text)
-    return {"subjects": subjects, "subject_confidence": confidence, "description": text.strip(), "engine": f"Local ({cfg['llm_model']})"}
+    return {**_parse_detections(text), "engine": f"Local ({cfg['llm_model']})"}
 
 
 def _call_anthropic(thumb_path: str, cfg: dict) -> dict:
@@ -153,8 +194,7 @@ def _call_anthropic(thumb_path: str, cfg: dict) -> dict:
     # With thinking enabled the content array may start with a thinking block; find the text block.
     content_blocks = resp.json()["content"]
     text = next((b["text"] for b in content_blocks if b.get("type") == "text"), "")
-    subjects, confidence = _parse_subjects(text)
-    return {"subjects": subjects, "subject_confidence": confidence, "description": text.strip(), "engine": f"Anthropic ({cfg['anthropic_model']})"}
+    return {**_parse_detections(text), "engine": f"Anthropic ({cfg['anthropic_model']})"}
 
 
 def _call(thumb_path: str, cfg: dict) -> dict:
@@ -189,7 +229,7 @@ def _call_raw(thumb_path: str, cfg: dict) -> dict:
         resp.raise_for_status()
         content_blocks = resp.json()["content"]
         text = next((b["text"] for b in content_blocks if b.get("type") == "text"), "")
-        return {"description": text.strip()}
+        return _parse_detections(text)
     else:
         url = cfg["llm_url"].rstrip("/")
         payload = {
@@ -209,7 +249,7 @@ def _call_raw(thumb_path: str, cfg: dict) -> dict:
         resp = _session.post(f"{url}/v1/chat/completions", json=payload, timeout=(5, 90))
         resp.raise_for_status()
         text = resp.json()["choices"][0]["message"]["content"] or ""
-        return {"description": text.strip()}
+        return _parse_detections(text)
 
 
 async def chat_image(thumb_path: str, prompt: str, config: Optional[dict] = None) -> dict:
