@@ -84,6 +84,10 @@ function handleEvent(data) {
     if (!wasConnected && S.status === 'connected') {
       fetchMedia();
       fetchAnalysis();
+    } else if (wasConnected && S.status === 'disconnected' && data.media_count !== S.media.length) {
+      // Sync completed — server media count changed, refresh gallery on all sessions
+      fetchMedia();
+      fetchAnalysis();
     } else if (wasDisconnected && S.mediaCount > 0 && S.media.length === 0) {
       // Cached media available but not loaded — covers server restart and page load during connecting
       fetchMedia();
@@ -476,7 +480,9 @@ function makeThumbCard(item, idx) {
     } else if (S.multiSelect) {
       toggleSelect(item, card);
     } else {
-      openLightbox(idx);
+      // Re-find index at click time — S.pageItems may have been rebuilt by SSE events since render
+      const currentIdx = S.pageItems.findIndex(p => p.id === item.id && p.kind === item.kind);
+      openLightbox(currentIdx >= 0 ? currentIdx : idx);
     }
   });
 
