@@ -611,15 +611,31 @@ async def _analysis_loop():
     await _log(f"Analysis: processing {len(pending)} image(s)…")
     pi_host = f"{_get_pi_ip()}:8080"
     cfg = dict(_analysis_config)
+    _person_subjects = {"person", "human", "legs"}
     for item in pending:
         id_, kind, thumb_path = item["id"], item["kind"], item.get("thumb_path") or ""
         if not thumb_path or not Path(thumb_path).exists():
             continue
         await _log(f"Analysis: [{kind.upper()} {id_}] analyzing…")
         result = await analyzer.analyze_image(thumb_path, cfg)
+        subjects = result.get("subjects", [])
+        if (_analysis_config.get("remove_person_only_images", False)
+                and subjects and all(s in _person_subjects for s in subjects)):
+            if _state.get("status") == "connected":
+                try:
+                    del_url = f"http://{CAMERA_IP}:{CAMERA_PORT}/cmd/delete/{id_}/{kind.upper()}"
+                    await asyncio.to_thread(requests.get, del_url, timeout=10)
+                except Exception as exc:
+                    await _log(f"Analysis: [{kind.upper()} {id_}] person-only camera delete failed — {exc}")
+                await asyncio.to_thread(_db.delete_media, id_, kind)
+                await _log(f"Analysis: [{kind.upper()} {id_}] removed — person only")
+            else:
+                await asyncio.to_thread(_db.mark_for_deletion, id_, kind)
+                await _log(f"Analysis: [{kind.upper()} {id_}] queued for deletion — person only (will delete from camera on next connect)")
+            await _broadcast({**_broadcast_state(), "type": "media_deleted", "id": id_, "kind": kind})
+            continue
         result_json = json.dumps(result)
         await asyncio.to_thread(_db.update_analysis, id_, kind, result_json)
-        subjects = result.get("subjects", [])
         await _broadcast({"type": "analysis_update", "id": id_, "kind": kind,
                           "subjects": subjects, "description": result.get("description", "")})
         if result.get("error"):
@@ -1269,6 +1285,7 @@ async def api_analysis_config_set(body: dict):
         "temperature": float,
         "alert_cooldown_minutes": int,
         "battery_warning_threshold": int,
+        "remove_person_only_images": bool,
     }
     update = {}
     for key, typ in scalar_fields.items():

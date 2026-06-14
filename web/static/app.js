@@ -944,11 +944,32 @@ async function loadAnalysisConfig() {
       container.innerHTML = rules.map(name => {
         const checked = (name in rulesEnabled) ? rulesEnabled[name] : true;
         const label = name.charAt(0).toUpperCase() + name.slice(1);
-        return `<div class="form-row">
+        let html = `<div class="form-row">
           <label>${label} alerts</label>
           <label class="toggle"><input type="checkbox" id="alert-rule-${name}"${checked ? ' checked' : ''}><span class="toggle-slider"></span></label>
         </div>`;
+        if (name === 'person') {
+          const removeChecked = !checked && !!(d.remove_person_only_images);
+          html += `<div class="form-row" style="padding-left:28px">
+            <label style="font-size:0.93em">Remove new Person only images</label>
+            <label class="toggle"><input type="checkbox" id="remove-person-only-images"${removeChecked ? ' checked' : ''}${checked ? ' disabled' : ''}><span class="toggle-slider"></span></label>
+          </div>`;
+        }
+        return html;
       }).join('');
+      const personRuleToggle = document.getElementById('alert-rule-person');
+      if (personRuleToggle) {
+        personRuleToggle.addEventListener('change', function() {
+          const removeToggle = document.getElementById('remove-person-only-images');
+          if (!removeToggle) return;
+          if (this.checked) {
+            removeToggle.checked = false;
+            removeToggle.disabled = true;
+          } else {
+            removeToggle.disabled = false;
+          }
+        });
+      }
     } else {
       container.innerHTML = '<div class="form-row"><span class="muted hint">No rules — configure in ~/.gardepro/alerts.yaml</span></div>';
     }
@@ -988,8 +1009,9 @@ async function saveAnalysisConfig() {
       temperature:            parseFloat(el('analysis-temperature').value),
       alert_cooldown_minutes: parseInt(el('alert-cooldown-minutes').value, 10) || 0,
       battery_warning_threshold: parseInt(el('battery-warning-threshold').value, 10) || 25,
-      alert_rules_enabled:    alertRulesEnabled,
-      chat_enabled:           el('chat-enabled').checked,
+      alert_rules_enabled:        alertRulesEnabled,
+      chat_enabled:               el('chat-enabled').checked,
+      remove_person_only_images:  !!(document.getElementById('remove-person-only-images')?.checked),
     };
     const r = await fetch('/api/analysis/config', {
       method: 'POST',
