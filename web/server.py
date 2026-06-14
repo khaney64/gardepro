@@ -524,8 +524,6 @@ async def _enumerate_media() -> list[dict]:
             await _broadcast({"type": "media_progress", "count": len(results)})
             if len(page) < PAGE:
                 break  # end of card
-            if new_in_page == 0:
-                break  # caught up to known history
             ts = min(item["id"] for item in page)
     except Exception as exc:
         await _log(f"Listing scan failed ({exc}) — falling back to probe scan")
@@ -1183,6 +1181,7 @@ async def api_sync():
                         except Exception:
                             pass
                     await _disconnect_flow()
+                    await _analysis_loop()
             except asyncio.CancelledError:
                 pass
             except Exception as exc:
