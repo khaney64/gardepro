@@ -1356,6 +1356,18 @@ async def find_device(address, ble_adapter):
     if address:
         return address
     print("Scanning for camera...")
+    # A prior crashed scan can leave BlueZ stuck in "Discovering: yes", causing
+    # every new discover() call to fail with org.bluez.Error.InProgress. Stop
+    # any lingering discovery before starting our own.
+    if is_linux():
+        try:
+            subprocess.run(
+                ["bluetoothctl", "--", "scan", "off"],
+                timeout=5, capture_output=True,
+            )
+            await asyncio.sleep(0.5)
+        except Exception:
+            pass
     scanner_kwargs = {}
     adapter_args = bluez_args(ble_adapter)
     if adapter_args:
