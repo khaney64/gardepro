@@ -632,6 +632,8 @@ async def _analysis_loop():
             else:
                 await asyncio.to_thread(_db.mark_for_deletion, id_, kind)
                 await _log(f"Analysis: [{kind.upper()} {id_}] queued for deletion — person only (will delete from camera on next connect)")
+            _media[:] = [m for m in _media if not (m["id"] == id_ and m["kind"] == kind)]
+            _state["media_count"] = len(_media)
             await _broadcast({**_broadcast_state(), "type": "media_deleted", "id": id_, "kind": kind})
             continue
         result_json = json.dumps(result)
