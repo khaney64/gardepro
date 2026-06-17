@@ -20,6 +20,7 @@ const S = {
   lastEvent: null,
 
   // UI
+  initialLoad: true,
   tab: 'gallery',
   page: 0,
   pageSize: parseInt(localStorage.getItem('pageSize') || '24', 10),
@@ -96,6 +97,11 @@ function handleEvent(data) {
     if (S.multiSelect && S.status === 'connecting') exitMultiSelect();
     updateUI();
 
+    if (S.initialLoad) {
+      S.initialLoad = false;
+      if (S.mediaCount === 0 && S.status !== 'connected') showTab('local');
+    }
+
   } else if (data.type === 'signal') {
     S.signalDbm   = data.dbm;
     S.signalLabel = data.label;
@@ -145,7 +151,6 @@ function handleEvent(data) {
 
 async function connectCamera() {
   if (S.status !== 'disconnected') return;
-  el('connect-error').classList.add('hidden');
   openConnectModal();
   await fetch('/api/connect', { method: 'POST' });
 }
@@ -227,14 +232,7 @@ async function deleteFile(id, kind) {
 function updateUI() {
   const connected = S.status === 'connected';
   const connecting = S.status === 'connecting' || S.status === 'disconnecting';
-  const hasCached = S.mediaCount > 0;
-  const showApp = connected || hasCached || connecting;
 
-  // Show app (gallery, header, nav) when connected OR when cache has media
-  show('connect-panel', !showApp);
-  show('app-header', showApp);
-  show('main-content', showApp);
-  show('bottom-nav', showApp);
   // Disconnect button only makes sense when connected
   show('disconnect-btn', connected);
   updateOfflineBar();
@@ -246,13 +244,6 @@ function updateUI() {
     syncBtn.disabled = connecting;
     const lbl = syncBtn.querySelector('.sync-label');
     if (lbl) lbl.textContent = connecting ? ' Syncing…' : ' Sync Now';
-  }
-
-  // Connect button (on the initial connect-panel)
-  const btn = el('connect-btn');
-  if (btn) {
-    btn.disabled = connecting;
-    btn.textContent = connecting ? 'Connecting…' : 'Connect Camera';
   }
 
   // Connection modal state machine
@@ -317,12 +308,6 @@ function updateBatteryBadge() {
   badge.title = title;
   badge.className = 'battery-badge ' + cls;
   badge.classList.remove('hidden');
-}
-
-function showConnectLog(visible) {
-  const log = el('connect-log');
-  log.innerHTML = '';
-  log.classList.toggle('hidden', !visible);
 }
 
 function showProgress(visible) {
@@ -1194,9 +1179,11 @@ async function formatSD() {
 // ── Offline bar ───────────────────────────────────────────────────────────────
 
 function updateOfflineBar() {
-  const offline = S.status !== 'connected' && S.mediaCount > 0;
+  const offline = S.status !== 'connected';
   show('offline-bar', offline);
   if (!offline) return;
+  const offlineSpan = el('offline-bar').querySelector('span');
+  if (offlineSpan) offlineSpan.textContent = S.mediaCount > 0 ? 'Offline — cached gallery' : 'Camera not connected';
   const label = el('last-synced-label');
   if (S.lastSynced) {
     const diffMin = (Date.now() - new Date(S.lastSynced).getTime()) / 60000;

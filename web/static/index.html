@@ -12,7 +12,7 @@
 <body>
 
   <!-- ── App header (visible when connected or connecting) ── -->
-  <header id="app-header" class="hidden">
+  <header id="app-header">
     <div class="header-left">
       <span class="app-title">GardePro</span>
       <span id="status-dot" class="status-dot"></span>
@@ -40,21 +40,8 @@
   </div>
 
   <!-- ── Connect panel (shown when disconnected with no cache) ── -->
-  <div id="connect-panel">
-    <div class="connect-card">
-      <div class="camera-icon">📷</div>
-      <h1>GardePro</h1>
-      <p class="connect-subtitle">Trail Camera Manager</p>
-      <div id="connect-error" class="error-banner hidden"></div>
-      <button id="connect-btn" class="btn btn-primary btn-lg" onclick="connectCamera()">
-        Connect Camera
-      </button>
-      <div id="connect-log" class="connect-log hidden"></div>
-    </div>
-  </div>
-
-  <!-- ── Main content (visible when connected) ── -->
-  <main id="main-content" class="hidden">
+  <!-- ── Main content ── -->
+  <main id="main-content">
 
     <!-- Gallery tab -->
     <div id="tab-gallery" class="tab-panel">
@@ -269,7 +256,7 @@
   </main>
 
   <!-- ── Bottom nav (mobile) ── -->
-  <nav id="bottom-nav" class="bottom-nav mobile-only hidden">
+  <nav id="bottom-nav" class="bottom-nav mobile-only">
     <button class="nav-item active" data-tab="gallery" onclick="showTab('gallery')">
       <span class="nav-icon">🖼</span>
       <span>Gallery</span>
@@ -345,6 +332,6 @@
 
   <!-- HLS.js from CDN (loaded only when needed) -->
   <script src="https://cdn.jsdelivr.net/npm/hls.js@latest/dist/hls.min.js"></script>
-  <script src="/static/app.js?v=19"></script>
+  <script src="/static/app.js?v=20"></script>
 </body>
 </html>
