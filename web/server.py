@@ -531,6 +531,8 @@ async def _enumerate_media() -> list[dict]:
 
     if not results:
         await _log("Media scan returned no results — preserving cached gallery")
+        _db.set_last_synced()
+        _state["last_synced"] = _db.get_last_synced()
         return results
 
     results.sort(key=lambda x: (x.get("captured_at") or "", x["id"]))
