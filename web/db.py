@@ -209,11 +209,14 @@ class CacheDB:
     # ── Saved media ───────────────────────────────────────────────────────────
 
     def save_media(self, cam_id: int, kind: str, saved_at: str,
-                   thumb_path: str, file_path: str) -> int:
+                   thumb_path: str, file_path: str,
+                   analysis_json: Optional[str] = None) -> int:
+        analyzed = 1 if analysis_json is not None else 0
         cur = self._conn.execute(
-            """INSERT INTO saved_media (cam_id, kind, saved_at, thumb_path, file_path)
-               VALUES (?, ?, ?, ?, ?)""",
-            (cam_id, kind, saved_at, thumb_path, file_path),
+            """INSERT INTO saved_media
+                   (cam_id, kind, saved_at, thumb_path, file_path, analyzed, analysis_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (cam_id, kind, saved_at, thumb_path, file_path, analyzed, analysis_json),
         )
         return cur.lastrowid
 

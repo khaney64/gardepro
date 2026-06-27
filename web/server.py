@@ -1560,9 +1560,17 @@ async def api_save(media_id: int, kind: str):
     file_dst = SAVED_DIR / f"{saved_at_fs}_{media_id}_{kind_lower}"
     await asyncio.to_thread(shutil.copy2, str(file_src), str(file_dst))
 
+    src_row = await asyncio.to_thread(
+        lambda: _db._conn.execute(
+            "SELECT analysis_json FROM media WHERE id=? AND kind=?",
+            (media_id, kind_lower)
+        ).fetchone()
+    )
+    analysis_json = src_row["analysis_json"] if src_row else None
+
     saved_id = await asyncio.to_thread(
         _db.save_media, media_id, kind_lower, saved_at_iso,
-        str(thumb_dst), str(file_dst)
+        str(thumb_dst), str(file_dst), analysis_json
     )
     return {"saved_id": saved_id, "saved_at": saved_at_iso}
 

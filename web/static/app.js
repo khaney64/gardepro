@@ -870,6 +870,7 @@ document.addEventListener('keydown', e => {
     return;
   }
   if (!el('lightbox').classList.contains('open')) return;
+  if (document.activeElement.matches('input, textarea, select')) return;
   if (e.key === 'ArrowLeft')  lightboxPrev();
   if (e.key === 'ArrowRight') lightboxNext();
 });
