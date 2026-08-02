@@ -31,13 +31,15 @@ Imported directly by `web/server.py` via `sys.path` manipulation. Provides:
 - `linux_connect_wifi()` / `linux_disconnect_wifi()` / `linux_wait_for_ip()` — nmcli-based WiFi management
 - Wake sequence: writes `AT+WAKEPULSE=10\r\n` to BLE char `6e400004`; camera opens WiFi hotspot SSID `CAM8Z8_<MAC>`
 - `linux_wait_for_ip()` calls `dhcpcd -1 --noarp`. The `--noarp` flag skips dhcpcd's ARP conflict probe, which the camera's AP was causing to fail ~50% of the time (probe timeout → fallback to 169.254.x.x link-local → DHCP reported as failed). The 192.168.8.x network is isolated so ARP conflict detection has no value.
+- `find_device()` runs `bluetoothctl scan off` (Linux only) before every `BleakScanner.discover()` call. A crashed/cancelled prior scan can leave BlueZ stuck reporting `Discovering: yes`, which makes every subsequent scan fail with `org.bluez.Error.InProgress`; clearing it first prevents that lockup.
 
 ### Backend (`web/server.py`)
 FastAPI app with a single shared `_state` dict that drives all UI updates. Key patterns:
 - All blocking I/O (requests, subprocess) runs via `asyncio.to_thread()`
 - Real-time push uses SSE (`/api/events`); every state change calls `_broadcast()`
 - Connection lifecycle: `_connection_flow()` → background tasks (keepalive, signal poll, thumb cache, analysis) → `_disconnect_flow()`
-- Media enumeration uses `GET /list/detail/backward/{ts}/{count}` (native listing endpoint, same as the official app). Response: `{"code":0,"data":[{"id":N,"type":1|2,"date":"YYYY-MM-DD HH:MM:SS",...}]}` — type 1=jpg, type 2=mp4. Paging: `{ts}` is an **item id** (not epoch); pass `min(id)` from the current page as `{ts}` for the next call. End of card: empty `data` array. Falls back to the old sequential `/file/{id}/JPG` probe (`_enumerate_media_probe`) if the listing call fails or returns an unexpected schema.
+- Media enumeration uses `GET /list/detail/backward/{ts}/{count}` (native listing endpoint, same as the official app). Response: `{"code":0,"data":[{"id":N,"type":1|2,"date":"YYYY-MM-DD HH:MM:SS",...}]}` — type 1=jpg, type 2=mp4. Paging: `{ts}` is an **item id** (not epoch); pass `min(id)` from the current page as `{ts}` for the next call. End of card: empty `data` array. Falls back to the old sequential `/file/{id}/JPG` probe (`_enumerate_media_probe`) if the listing call fails or returns an unexpected schema. If a full listing scan returns zero results (e.g. transient camera hiccup), `last_synced` is still stamped and the cached gallery is preserved rather than wiped, to avoid a reconnect loop against an empty result.
+- After a successful listing scan, `_sync_to_db()` purges any DB row whose `(id, kind)` is no longer present on the camera — keeps the cache in sync after on-camera deletion or an SD card format, without waiting on the offline-delete flush path.
 - Auto-sync loop (`GARDEPRO_AUTO_CONNECT=1`): connect → enumerate → cache thumbs → analyze → disconnect, with `AUTO_SYNC_RETRIES=2`. Auto-sync is **paused** when the last-known battery level is at or below `BATTERY_AUTOSYNC_DISABLE_PCT` (default 10%) to preserve power; manual connect still works.
 - **Thumb cache error handling** (`_thumb_cache_loop`): a 4xx/5xx response from the camera (e.g. HTTP 500 for a corrupt/missing file) permanently marks `thumb_cached=1` with no path, preventing infinite retry on every sync. The gallery shows no thumbnail for that item.
 - **Battery monitoring** (`_battery_poll_loop`): polls `GET /cmd/info/2` every 60 s while connected; broadcasts `{"type":"battery","pct","mv","temp","ext_power","updated"}` over SSE and persists the reading to the DB (`set_battery`) so it shows in the UI badge while disconnected. `_evaluate_battery_alerts()` fires `alerter.send_battery_alert()` when crossing `battery_warning_threshold` (default 25%) and every 5% below that; resets on recovery. BLE connect/ops/disconnect all have hard `asyncio.wait_for` timeouts (`BLE_CONNECT_TIMEOUT=20s`, `BLE_OP_TIMEOUT=10s`, `BLE_DISCONNECT_TIMEOUT=5s`) to prevent BlueZ from wedging the connect flow.
@@ -53,9 +55,11 @@ Two backends selectable at runtime:
 - **Local** (`backend: "llm"`): llama.cpp OpenAI-compatible API at `GARDEPRO_LLM_URL`; sends thinking via `chat_template_kwargs`
 - **Anthropic** (`backend: "anthropic"`): direct Anthropic Messages API; sends thinking via `thinking` block
 
-Config persisted at `~/.gardepro/analysis_config.json`. Subject detection is keyword-matching over LLM text output (`_KEYWORDS` list).
+Config persisted at `~/.gardepro/analysis_config.json`. `_parse_detections()` (`web/analyzer.py`) first tries to parse the LLM response as structured JSON: `{"detections":[{"label","name","confidence"}, ...]}` (tolerates a ```json fenced block). Each detection's `label` and, if present, `name` become subjects with a per-subject confidence (0–5). If the response isn't valid JSON, it falls back to `_parse_subjects_text()` — keyword-matching over free-text output against the `_KEYWORDS` list, with an optional trailing `subject [N]` confidence marker. `_KEYWORDS` also supports a small set of specific pet names so the model can call out a known individual pet by name rather than just "cat"/"dog"; keep any additions to that list out of shared docs since they're household-specific.
 
-**Confidence scores:** The LLM prompt instructs the model to append a confidence level after each detected subject in the form `subject [N]` where N is 0 (lowest) to 5 (highest). `_parse_subjects()` extracts these and returns `(subjects: list[str], confidence: dict[str, int])`; callers add `subject_confidence` to the result dict. Missing or unparseable markers default to 0. Confidence is logged alongside detections in `_analysis_loop` (e.g. `deer [3], fox [0]`).
+**Confidence scores:** Both the structured-JSON and free-text parse paths return `(subjects: list[str], confidence: dict[str, int])`; callers add `subject_confidence` to the result dict. Missing or unparseable markers default to 0. Confidence is logged alongside detections in `_analysis_loop` (e.g. `deer [3], fox [0]`).
+
+**Privacy filter — remove person-only images:** `remove_person_only_images` (Analysis Settings, nested under the Person alert rule toggle) deletes a newly analyzed image immediately if every detected subject is in `{"person","human","legs"}` — no wildlife/pet also present. If connected, it deletes on-camera and from the DB immediately; if disconnected, it calls `_db.mark_for_deletion()` so the delete flushes on the next connect (same `pending_delete` mechanism as manual offline delete). Mutually exclusive with the Person alert rule in the UI — enabling one disables the other, since alerting on a person and silently removing person-only images don't make sense together.
 
 **Thinking budget retries:** `analyze_image()` has two retry triggers, each doubling `thinking_budget`:
 1. **Empty response** — model returned no text at all (budget exhausted).
@@ -64,10 +68,18 @@ Config persisted at `~/.gardepro/analysis_config.json`. Subject detection is key
 ### Alert engine (`web/alerter.py`)
 Rules loaded from `~/.gardepro/alerts.yaml` at startup. Each rule has `name`, `keywords`, `action` (log|email), optional `catch_all: true`. Dedup: `_fired` set prevents re-alerting the same image; `_last_fired` dict enforces per-rule cooldown. Email sends inline thumbnail via CID attachment.
 
+**Consolidated email:** if a single image triggers multiple `action: email` rules at once, `check_and_alert()` sends **one** email covering all matched subjects/rules rather than one email per rule — subject line lists the union of matched subjects, and each rule's cooldown/dedup state is still updated individually on send.
+
+**Battery alerts:** `alerter.send_battery_alert(pct, charging)` (always logs; emails if SMTP configured) is called from `web/server.py`'s `_evaluate_battery_alerts()` — separate code path from image-based `check_and_alert()`, not gated by alert rules.
+
 **Alert scope:** `alerter.check_and_alert()` is called only from `_analysis_loop()` (auto-sync path). Manual re-analysis via `POST /api/analysis/run/{id}/{kind}` and chat endpoints do **not** trigger alerts.
 
+**Chat reasoning:** the chat endpoints append `"Include your reasoning."` to the user's prompt; if the model responds with the same structured-JSON detection format, any per-detection `reasoning` field passes through `_parse_detections()` untouched (it isn't a field the parser extracts, just one it doesn't strip) and the frontend renders it under each detection in the chat dialog.
+
 ### Frontend (`web/static/`)
-Vanilla HTML/JS/CSS — no build step. Connects to SSE stream on load; dispatches on `type` field (`state`, `log`, `media_progress`, `cache_progress`, `analysis_update`, `signal`, `media_deleted`). No framework or bundler. Bump `?v=N` on the `style.css` and `app.js` `<link>`/`<script>` tags in `index.html` whenever those files change.
+Vanilla HTML/JS/CSS — no build step. Connects to SSE stream on load; dispatches on `type` field (`state`, `log`, `alert_error`, `signal`, `battery`, `media_progress`, `cache_progress`, `media_deleted`, `analysis_update`, `saved_analysis_update`). No framework or bundler. Bump `?v=N` on the `style.css` and `app.js` `<link>`/`<script>` tags in `index.html` whenever those files change.
+
+**App is always visible:** there is no full-screen "Connect" gate — `app-header`/`main-content`/`bottom-nav` render unconditionally. When disconnected, the offline bar shows instead (text varies: "Offline — cached gallery" vs "Camera not connected" for an empty cache) and is the way to trigger a connect. On first load with an empty gallery, the UI auto-switches to the Local tab.
 
 **Gallery grid columns:** desktop ≥1025px → 5; tablet 641–1024px → 4; phone landscape ≤960px → 3; phone portrait ≤480px → 2.
 

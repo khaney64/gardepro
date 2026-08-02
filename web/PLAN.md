@@ -4,8 +4,9 @@
 
 A self-hosted web app running on a Raspberry Pi that replaces the
 vendor mobile app for browsing camera media, deleting files, live streaming, and
-controlling camera settings. A smart backend eventually handles auto-connect,
-media caching, and AI-powered animal detection.
+controlling camera settings. The backend handles auto-connect, media caching,
+AI-powered animal/person detection, and keyword-based alerting; see Phase status
+below for what's shipped vs. still planned.
 
 ## Architecture
 
@@ -19,9 +20,10 @@ Connection Manager  (imports from ../ble_wake.py)
 Camera (GardePro E6P)
 
 Cache (web/db.py → ~/.gardepro/)
-    cache.db      — SQLite: media index, sync metadata
+    cache.db      — SQLite: media index, saved copies, battery + sync metadata
     thumbs/       — cached thumbnail JPEGs (320×180, ~20 KB each)
     files/        — cached full files (tee-written on first view)
+    saved/        — Local-tab copies saved permanently from the Pi
 ```
 
 **Stack:**
@@ -63,7 +65,10 @@ sudo systemctl daemon-reload && sudo systemctl enable --now gardepro
 | `GARDEPRO_WIFI_IFACE` | first `wlx*` | WiFi interface for camera hotspot |
 | `GARDEPRO_RTSP_PORT` | `8554` | Local port for RTSP TCP proxy |
 | `GARDEPRO_AUTO_CONNECT` | `0` | Set to `1` to enable periodic background sync |
-| `GARDEPRO_SYNC_INTERVAL` | `600` | Seconds between auto-sync attempts |
+| `GARDEPRO_SYNC_INTERVAL` | `900` | Seconds between auto-sync attempts |
+| `GARDEPRO_LLM_URL` | `http://devbox.lan:8080` | Base URL of local llama.cpp OpenAI-compatible API |
+| `GARDEPRO_LLM_MODEL` | — | Model name for local vision analysis |
+| `ANTHROPIC_API_KEY` | — | Required when analysis backend is set to `anthropic` |
 | `GARDEPRO_ALERT_EMAIL` | — | Recipient address for email alerts |
 | `GARDEPRO_ALERT_FROM_EMAIL` | `GARDEPRO_ALERT_EMAIL` | Sender address (if different from recipient) |
 | `GARDEPRO_ALERT_SMTP_HOST` | `smtp.gmail.com` | SMTP server hostname |
@@ -108,11 +113,11 @@ the camera serves the same underlying media either way.
 
 | Feature | Status |
 |---|---|
-| Responsive layout: 2 cols phone / 4 tablet / 6 desktop | ✅ |
+| Responsive gallery grid: 2 cols phone portrait / 3 phone landscape / 4 tablet / 5 desktop | ✅ (superseded by Phase 5; see below) |
 | Bottom nav bar on phone, tab bar in header on desktop | ✅ |
 | Touch targets ≥ 44 px; no hover-only interactions | ✅ |
 | Safe-area padding for notched phones | ✅ |
-| Connect panel with live step-by-step status log (SSE) | ✅ |
+| ~~Full-screen connect panel gate~~ — removed in Phase 5; see below | ⚠ superseded |
 | Disconnect state: log clears, button shows correct label | ✅ |
 | WiFi signal badge in header (Excellent/Good/Fair/Poor + dBm) | ✅ |
 | Gallery: newest-first default sort with toggle (persisted in localStorage) | ✅ |
@@ -166,10 +171,10 @@ only write commands are gated.
 
 ### Side discovery: camera scans for home WiFi
 
-During monitor mode capture, the camera MAC (`0c:cf:89:7e:e9:c3`) was observed
-sending 802.11 Probe Requests for `HaneyNet` — suggesting the camera has a
-dual-mode capability (AP hotspot + STA client to home WiFi). If confirmed, this
-could enable auto-sync without BLE wake if the camera joins home network directly.
+During monitor mode capture, the camera's own MAC address was observed sending
+802.11 Probe Requests for the tester's home WiFi SSID — suggesting the camera has
+a dual-mode capability (AP hotspot + STA client to home WiFi). If confirmed, this
+could enable auto-sync without BLE wake if the camera joins the home network directly.
 
 ### Path to unblock
 
@@ -233,7 +238,7 @@ Files on disk:
 | MP4 offline: thumbnail + "Connect to play video" note | ✅ |
 | Delete button hidden in lightbox when disconnected | ✅ |
 | Settings tab shows "Connect to the camera to view settings." when offline | ✅ |
-| Gallery grid: 2 cols mobile / 4 tablet / 6 desktop (max 6 on any width) | ✅ |
+| Gallery grid: 2 cols phone portrait / 3 phone landscape / 4 tablet / 5 desktop (see Phase 5 — reduced from 6 to 5 on desktop) | ✅ |
 
 ### Thumbnail details
 
@@ -254,7 +259,8 @@ upscaling. At 1920 px, each column is 320 px — exactly native resolution.
 | LLM backend: Anthropic Claude | ✅ |
 | Base64-encode thumbnail → send to LLM with configurable prompt | ✅ |
 | Background analysis queue — runs after thumbnail caching per connect/sync | ✅ |
-| Subject keyword extraction from LLM response | ✅ |
+| Subject extraction: structured JSON detections (`{"detections":[{label,name,confidence}]}`) with keyword-scan fallback for free-text responses (see Phase 5) | ✅ |
+| Retry on empty response or all-low-confidence (≤3) detections, doubling thinking budget | ✅ (see Phase 5) |
 | Store `analyzed` + `analysis_json` in `cache.db` (both `media` and `saved_media` tables) | ✅ |
 | SSE push `analysis_update` / `saved_analysis_update` to browser on completion | ✅ |
 | Re-analyze button in lightbox (🔬, force re-run on demand) | ✅ |
@@ -314,7 +320,7 @@ To enable email alerts:
 Email format — Subject: `GardePro alert: raccoon detected`; Body: plain text with
 detection name, image URL (`http://pi:8080/api/file/{id}/{kind}`), and analysis description.
 
-### Deferred to Phase 5
+### Deferred (see Phase 6)
 
 - **HTTP webhook action** — `action: webhook` in alerts.yaml not yet implemented
 - **Cat tracking / time-of-day analytics** — no aggregation queries or UI panel for sighting patterns
@@ -322,7 +328,72 @@ detection name, image URL (`http://pi:8080/api/file/{id}/{kind}`), and analysis 
 
 ---
 
-## Phase 5 — Analytics + Webhook Alerts (planned)
+## Phase 5 — Battery Monitoring, Privacy Filter & Operational Hardening ✅ Complete
+
+Phase 5 turned out to be a round of reliability, privacy, and UX hardening rather
+than the analytics/webhook work originally sketched for it — that work is still
+wanted and now lives in Phase 6, below.
+
+### Battery monitoring (`server.py`)
+
+| Feature | Status |
+|---|---|
+| `_battery_poll_loop()` polls `GET /cmd/info/2` every 60 s while connected; broadcasts `type: "battery"` over SSE | ✅ |
+| Last-known battery reading persisted to DB (`meta` table via `set_battery`/`get_battery`) — survives disconnect/restart, shown in header badge while offline | ✅ |
+| Auto-sync paused at/below `BATTERY_AUTOSYNC_DISABLE_PCT` (default 10%) to preserve power; manual connect still allowed | ✅ |
+| Low-battery alerts: fire at the configurable `battery_warning_threshold` (default 25%) and every 5% below; reset once the level recovers above threshold | ✅ |
+| BLE/WiFi ops all have hard `asyncio.wait_for` timeouts (connect 20 s, op 10 s, disconnect 5 s) to prevent BlueZ from wedging the connect flow | ✅ |
+
+### Media sync & cache reliability
+
+| Feature | Status |
+|---|---|
+| Media enumeration refactored onto the native `/list/detail/backward/{ts}/{count}` listing endpoint (was sequential per-ID probing); old probe kept as fallback on schema mismatch | ✅ |
+| After each successful scan, DB rows no longer present on camera are purged (handles on-camera delete + SD card format) | ✅ |
+| A scan that returns zero results still stamps `last_synced` and preserves the cached gallery, instead of wiping it or looping reconnect attempts | ✅ |
+| Gallery sorted by `captured_at` instead of `id` — fixes ordering after an SD card format resets IDs | ✅ |
+| Thumbnail cache permanently skips retry on a camera 4xx/5xx response (corrupt/missing file) instead of retrying every sync | ✅ |
+| Auto-sync retry: up to `AUTO_SYNC_RETRIES` (2) extra attempts on connect failure, 30 s apart | ✅ |
+| Analysis now runs after disconnect in the auto-sync path, releasing the camera connection sooner | ✅ |
+| DHCP timeout tightened from 90 s to 30 s; `dhcpcd --noarp` skips the ARP conflict probe that was failing against the camera's isolated AP ~50% of the time | ✅ |
+| BlueZ stuck-discovery guard: `bluetoothctl scan off` runs before every BLE scan to clear a lingering "Discovering: yes" state left by a crashed prior scan | ✅ |
+| Stale-sync warning threshold raised from 12 to 20 minutes (reduce false "stale" flags around normal 15-min sync cadence) | ✅ |
+| Offline delete: mark an image `pending_delete` while disconnected (long-press → delete); flushed to the camera + DB on the next connect, retried if the camera is unreachable mid-flush | ✅ |
+
+### Analysis: structured detections + privacy filter (`analyzer.py`)
+
+| Feature | Status |
+|---|---|
+| LLM response parsed as structured JSON (`{"detections":[{"label","name","confidence"}]}`) with per-detection confidence; falls back to free-text keyword scan if the response isn't valid JSON | ✅ |
+| Chat responses can include a `reasoning` field per detection when the model returns the structured format; shown inline under each detection in the chat dialog | ✅ |
+| Prompt text sent before image data in the request payload to enable LLM prompt-prefix caching | ✅ |
+| **Privacy filter** — "Remove new Person only images" (Analysis Settings, nested under the Person alert rule): deletes a newly analyzed image immediately if every detected subject is person/human/legs and nothing else. Deletes on-camera + DB if connected, or queues via the offline-delete flag if not. Mutually exclusive with the Person alert rule in the UI | ✅ |
+| Named-pet recognition — the keyword list can call out specific known pets by name (in addition to generic species like "cat"/"dog"); badge and keyword lists are configured locally per household, not meant to be shared verbatim in this repo | ✅ |
+| Alert scope fix: disabled alert rules no longer leak their keywords into the catch-all rule's matching | ✅ |
+| Log timestamps shown in US Eastern time (auto-tracks EST/EDT) | ✅ |
+
+### Alerting
+
+| Feature | Status |
+|---|---|
+| Multiple `action: email` rules triggered by the same image are consolidated into a single email instead of one per rule | ✅ |
+
+### Frontend / UX
+
+| Feature | Status |
+|---|---|
+| Full-screen "Connect Camera" gate removed — header/gallery/nav are always visible; offline bar (with dynamic text) is now the sole connect entry point when disconnected | ✅ |
+| On first page load with an empty gallery, UI auto-switches to the Local tab | ✅ |
+| Ctrl+Click multi-select added for desktop gallery (touch long-press remains the mobile equivalent) | ✅ |
+| Desktop gallery grid reduced from 6 to 5 columns at ≥1025px (thumbnails were rendering below native 320 px res at 6-wide on common desktop widths) | ✅ |
+| Cached gallery now shown during the "connecting" transition, not just once fully connected | ✅ |
+| Analysis config loaded at server startup so the chat button reflects its enabled state without first visiting Settings | ✅ |
+| Saving a photo/video to the Local tab carries over the camera-side analysis result immediately (no need to re-run analysis on the saved copy) | ✅ |
+| Lightbox arrow-key navigation suppressed while a text input (e.g. the chat prompt) has focus | ✅ |
+
+---
+
+## Phase 6 — Analytics + Webhook Alerts (planned)
 
 ### Webhook alert action
 
@@ -338,13 +409,20 @@ detection name, image URL (`http://pi:8080/api/file/{id}/{kind}`), and analysis 
   - Sighting frequency per animal type (bar chart or table)
   - Time-of-day histogram (e.g., raccoon mostly 11pm–2am)
   - Most recent sighting per animal type
-- Cat tracking: running log of all cat detections with timestamps
+- Named-pet tracking: running log of all named-pet detections with timestamps
 
-### Alert rule management from UI
+### Alert rule *definition* editing from UI
+
+Note the scope here: Settings → Alert Settings already lets you enable/disable each
+existing rule, set the cooldown, set the battery-warning threshold, toggle the
+person-only removal filter, and send a test email (all Phase 4/5, already ✅ —
+see the Alerting tables above). What's still missing is editing what a rule
+*is*:
 
 - Read/write `~/.gardepro/alerts.yaml` from the web UI
-- Add/remove/edit rules: name, keywords list, action, webhook URL
-- No YAML editing required for basic rule management
+- Add/remove rules, and edit an existing rule's name, keyword list, or action
+  type (log/email/webhook) — currently requires hand-editing the YAML file
+- No YAML editing required once this lands
 
 ---
 

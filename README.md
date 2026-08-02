@@ -49,24 +49,30 @@ GARDEPRO_WIFI_PASSWORD=<password> python3 -m uvicorn server:app --host 0.0.0.0 -
 ```
 
 **Features:**
-- Gallery with pagination, sort, multi-select delete, full-resolution lightbox
+- Gallery with pagination, sort, multi-select delete (long-press on touch, Ctrl+Click on desktop), full-resolution lightbox
 - Live RTSP proxy + HLS in-browser streaming (requires ffmpeg)
 - Camera settings read; SD card format
 - Local tab — save individual photos/videos to Pi-local storage (`~/.gardepro/saved/`); files are named `{timestamp}_{cam_id}_{kind}` so they survive camera SD resets; viewable and deletable offline
+- The app itself is always visible, even fully disconnected with an empty cache — there's no blocking "Connect" screen. A sticky offline bar is the connect entry point whenever disconnected
 - Connection progress modal — shows each BLE/WiFi step in real-time, stays open on failure with error detail and Cancel/Close controls
 - Sync Now button — on-demand sync from the header; connects, syncs, and auto-disconnects if offline
 - Logs tab — terminal-style view of recent server logs (last 200 entries), updated live via SSE; useful for diagnosing auto-sync failures
 - Last Event indicator — header shows how long ago the newest media item was discovered; updates every 60 seconds
-- Offline gallery — cached thumbnails/media remain browsable when disconnected; "Last synced" warns (⚠ orange) if stale beyond 10 minutes
-- Auto-sync — background BLE wake + WiFi connect + thumbnail cache every 10 minutes (`GARDEPRO_AUTO_CONNECT=1`)
-- LLM image analysis — thumbnails sent to local llama.cpp or Anthropic Claude for animal/person detection; results shown as subject badges and colored borders on thumbnails, description in lightbox; re-analyze on demand via 🔬 button
+- Offline gallery — cached thumbnails/media remain browsable when disconnected; "Last synced" warns (⚠ orange) if stale beyond 20 minutes
+- Offline delete — mark a photo/video for deletion while disconnected; flushed to the camera and DB automatically on the next connect
+- Auto-sync — background BLE wake + WiFi connect + thumbnail cache every 15 minutes by default (`GARDEPRO_AUTO_CONNECT=1`, interval configurable via `GARDEPRO_SYNC_INTERVAL`); retries on failure, and pauses automatically when battery is low
+- Battery monitoring — polls camera power status while connected; percent/voltage/temperature shown in a header badge (persists across disconnects); configurable low-battery email/log alert with auto re-alert every 5% below threshold
+- LLM image analysis — thumbnails sent to local llama.cpp or Anthropic Claude for animal/person detection; the model returns structured per-subject detections with a confidence score (falls back to free-text keyword scanning if the response isn't valid JSON); results shown as subject badges and colored borders on thumbnails, description in lightbox; re-analyze on demand via 🔬 button; low-confidence or empty responses automatically retry with a larger thinking budget
+- Privacy filter — "Remove new Person only images" (Analysis Settings) auto-deletes a newly analyzed image if the only thing detected is a person, without alerting; mutually exclusive with the Person alert rule
 - LLM chat — 💬 button in lightbox (enabled via Chat toggle in Analysis Settings); opens a dialog pre-filled with the current prompt so you can ask anything about the image; each submit is independent, response is shown inline; does not affect analysis tags or stored data
 - Thinking budget — configurable token budget for model extended reasoning (Analysis Settings → Thinking Budget; 0 = off); for local llama.cpp sends `chat_template_kwargs` with `enable_thinking` + `thinking_budget`; for Anthropic sends a `thinking` block; `max_tokens` sent to API = thinking_budget + answer headroom
-- Alert rules — keyword-based rules in `~/.gardepro/alerts.yaml`; actions: log or email (configurable SMTP — Gmail, Postmark, etc.); per-rule enable/disable and cooldown in Settings UI; rule order (Person → Cat → Raccoon → Wildlife → Other) controls alert priority; "Send test" button to verify email config; failures surfaced in Logs tab; email alerts embed the detection thumbnail inline; catch-all rule support (`catch_all: true`) fires for any detection not matched by a specific rule
+- Alert rules — keyword-based rules in `~/.gardepro/alerts.yaml`; actions: log or email (configurable SMTP — Gmail, Postmark, etc.); per-rule enable/disable and cooldown in Settings UI; rule order (Person → Cat → Raccoon → Wildlife → Other) controls alert priority; "Send test" button to verify email config; failures surfaced in Logs tab; email alerts embed the detection thumbnail inline; catch-all rule support (`catch_all: true`) fires for any detection not matched by a specific rule (disabled rules never leak their keywords into the catch-all match); multiple rules triggered by the same image are consolidated into one email instead of sending one per rule
 
 **Files:**
-- `web/server.py` — FastAPI backend: BLE wake, WiFi connect, media proxy, HLS streaming, auto-sync, in-memory log buffer, saved-media endpoints
-- `web/db.py` — SQLite cache layer: media index, thumbnail/file tracking, saved_media table
+- `web/server.py` — FastAPI backend: BLE wake, WiFi connect, media proxy, HLS streaming, auto-sync, battery polling, in-memory log buffer, saved-media endpoints
+- `web/db.py` — SQLite cache layer: media index, thumbnail/file tracking, saved_media table, battery/sync metadata
+- `web/analyzer.py` — LLM image analysis: local llama.cpp or Anthropic Claude backend, structured detection parsing, chat
+- `web/alerter.py` — Alert rules engine: keyword matching, email/log actions, battery alerts
 - `web/static/` — Vanilla HTML/JS/CSS frontend (no build step)
 - `web/PLAN.md` — Full architecture, phase status, and open questions
 
@@ -85,6 +91,7 @@ GARDEPRO_WIFI_PASSWORD=<password> python3 -m uvicorn server:app --host 0.0.0.0 -
 - Phase 3 (SQLite cache, offline gallery, auto-sync, systemd) — ✅ complete
 - Phase 3.5 (connection dialog, logs tab, stale-sync warning, last-event, sync-now, local save tab) — ✅ complete
 - Phase 4 (LLM image analysis, alert rules, email alerts, per-rule UI controls) — ✅ complete
-- Phase 5 (webhook alerts, animal sighting analytics, alert rule UI editing) — 📋 planned
+- Phase 5 (battery monitoring, offline delete, structured LLM detections, privacy filter, sync/connect reliability hardening) — ✅ complete
+- Phase 6 (webhook alerts, animal sighting analytics, alert rule UI editing) — 📋 planned
 
 See `web/PLAN.md` for full details.
