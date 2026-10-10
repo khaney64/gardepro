@@ -18,6 +18,7 @@ const S = {
   error: null,
   lastSynced: null,
   lastEvent: null,
+  idleWarningEndsAt: null,   // epoch seconds when server auto-disconnects an idle session
 
   // UI
   initialLoad: true,
@@ -81,6 +82,7 @@ function handleEvent(data) {
     if (data.ext_power != null) { S.extPower = data.ext_power; }
     if (data.battery_updated != null) { S.batteryUpdated = data.battery_updated; }
     S.autosyncPausedBattery = !!data.autosync_paused_battery;
+    S.idleWarningEndsAt = data.idle_warning_ends_at || null;
 
     if (!wasConnected && S.status === 'connected') {
       fetchMedia();
@@ -191,6 +193,35 @@ async function disconnectCamera() {
   await fetch('/api/disconnect', { method: 'POST' });
 }
 
+// ── Idle auto-disconnect ──────────────────────────────────────────────────────
+// The server owns the timer and disconnects on its own; this only renders the countdown.
+
+let idleCountdownTimer = null;
+
+function updateIdleModal() {
+  const active = S.status === 'connected' && S.idleWarningEndsAt != null;
+  show('idle-modal', active);
+  if (!active) {
+    clearInterval(idleCountdownTimer);
+    idleCountdownTimer = null;
+    return;
+  }
+  const render = () => {
+    const secs = Math.max(0, Math.ceil(S.idleWarningEndsAt - Date.now() / 1000));
+    el('idle-countdown').textContent = secs;
+  };
+  render();
+  if (!idleCountdownTimer) idleCountdownTimer = setInterval(render, 250);
+}
+
+async function cancelIdleDisconnect() {
+  await fetch('/api/idle/reset', { method: 'POST' });
+}
+
+async function idleDisconnectNow() {
+  await fetch('/api/disconnect', { method: 'POST' });
+}
+
 async function fetchMedia() {
   showProgress(true);
   let all = [];
@@ -270,6 +301,7 @@ function updateUI() {
   updateBatteryBadge();
   updateLiveTab();
   updateSettingsTab();
+  updateIdleModal();
 }
 
 function updateSignalBadge() {
@@ -865,6 +897,7 @@ async function lightboxSave() {
 // Keyboard navigation in lightbox
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
+    if (!el('idle-modal').classList.contains('hidden')) { cancelIdleDisconnect(); return; }
     if (!el('chat-dialog').classList.contains('hidden')) { closeChatDialog(); return; }
     if (el('lightbox').classList.contains('open')) closeLightbox();
     return;
@@ -921,6 +954,7 @@ async function loadAnalysisConfig() {
     // Cooldown
     el('alert-cooldown-minutes').value = d.alert_cooldown_minutes ?? 30;
     el('battery-warning-threshold').value = d.battery_warning_threshold ?? 25;
+    el('idle-timeout-minutes').value = d.idle_timeout_minutes ?? 5;
 
     // Per-rule toggles
     const rulesEnabled = d.alert_rules_enabled || {};
@@ -969,7 +1003,7 @@ function toggleAnalysisBackend() {
 }
 
 function _setConfigStatus(msg) {
-  ['analysis-save-status', 'alerts-save-status'].forEach(id => {
+  ['analysis-save-status', 'alerts-save-status', 'connection-save-status'].forEach(id => {
     const el_ = document.getElementById(id);
     if (el_) el_.textContent = msg;
   });
@@ -995,6 +1029,7 @@ async function saveAnalysisConfig() {
       temperature:            parseFloat(el('analysis-temperature').value),
       alert_cooldown_minutes: parseInt(el('alert-cooldown-minutes').value, 10) || 0,
       battery_warning_threshold: parseInt(el('battery-warning-threshold').value, 10) || 25,
+      idle_timeout_minutes:   parseInt(el('idle-timeout-minutes').value, 10) || 0,
       alert_rules_enabled:        alertRulesEnabled,
       chat_enabled:               el('chat-enabled').checked,
       remove_person_only_images:  !!(document.getElementById('remove-person-only-images')?.checked),

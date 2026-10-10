@@ -488,6 +488,11 @@ header {
   display: flex; gap: 8px; justify-content: flex-end;
 }
 
+/* ── Idle auto-disconnect modal (above lightbox, which may be playing a video) ── */
+.idle-modal { z-index: 1200; }
+.idle-modal-body { padding: 18px 20px; font-size: .95em; }
+.idle-modal-body strong { font-variant-numeric: tabular-nums; }
+
 /* ── Chat dialog ── */
 .chat-dialog {
   position: fixed; inset: 0; z-index: 1100;

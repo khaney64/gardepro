@@ -88,6 +88,7 @@ AUTO_SYNC_RETRIES      = 2    # extra attempts after first failure
 AUTO_SYNC_RETRY_DELAY  = 30   # seconds between retry attempts
 HTTP_VERIFY_RETRIES    = 3    # camera HTTP may not be ready instantly after DHCP
 HTTP_VERIFY_RETRY_WAIT = 3    # seconds between HTTP verify retries
+IDLE_WARNING_SECS      = 30   # countdown shown before an idle manual session auto-disconnects
 
 # ── Shared camera session ─────────────────────────────────────────────────────
 
@@ -117,6 +118,7 @@ _state: dict = {
     "error":         None,
     "last_synced":   None,
     "last_event":    None,
+    "idle_warning_ends_at": None,  # Unix epoch when idle auto-disconnect fires; None unless counting down
 }
 # Full media list kept separate (too large to include in every SSE broadcast)
 _media: list[dict] = []
@@ -134,6 +136,7 @@ _last_camera_ssid:  Optional[str] = None   # remembered across retry attempts wi
 _connection_lock    = asyncio.Lock()        # prevents concurrent _connection_flow calls
 _alert_rules:       list[dict] = []
 _analysis_config:   dict = {}
+_idle_reset         = asyncio.Event()       # set to restart the idle auto-disconnect timer
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -298,6 +301,34 @@ async def _keepalive_loop():
         except Exception:
             pass
         await asyncio.sleep(60)
+
+
+async def _idle_timeout_loop():
+    """Auto-disconnect a manual session after idle_timeout_minutes, with a cancellable countdown."""
+    while True:
+        minutes = int(_analysis_config.get("idle_timeout_minutes", 5) or 0)
+        _idle_reset.clear()
+        if minutes <= 0:
+            await asyncio.sleep(30)  # disabled — re-check config periodically
+            continue
+        try:
+            await asyncio.wait_for(_idle_reset.wait(), timeout=minutes * 60)
+            continue  # reset requested (cancel or config change)
+        except asyncio.TimeoutError:
+            pass
+        _state["idle_warning_ends_at"] = time.time() + IDLE_WARNING_SECS
+        await _log(f"Idle {minutes} min — disconnecting in {IDLE_WARNING_SECS}s unless cancelled")
+        await _broadcast(_broadcast_state())
+        try:
+            await asyncio.wait_for(_idle_reset.wait(), timeout=IDLE_WARNING_SECS)
+            _state["idle_warning_ends_at"] = None
+            await _log("Idle disconnect cancelled — timer reset")
+            await _broadcast(_broadcast_state())
+        except asyncio.TimeoutError:
+            await _log("Idle timeout — disconnecting")
+            # Not awaited: _disconnect_flow cancels this task via _background_tasks.
+            asyncio.create_task(_disconnect_flow())
+            return
 
 
 async def _signal_poll_loop(iface: str):
@@ -980,7 +1011,7 @@ async def _disconnect_flow():
         "my_ip": None, "signal_dbm": None, "signal_label": None,
         # battery_* are intentionally NOT reset — keep last-known reading while disconnected
         "media_count": len(_media), "rtsp_url": None, "error": None,
-        "last_synced": _db.get_last_synced(),
+        "last_synced": _db.get_last_synced(), "idle_warning_ends_at": None,
     })
     await _broadcast(_broadcast_state())
 
@@ -1033,6 +1064,7 @@ async def _resume_session(iface: str, my_ip: str):
         _background_tasks.append(asyncio.create_task(_keepalive_loop()))
         _background_tasks.append(asyncio.create_task(_signal_poll_loop(iface)))
         _background_tasks.append(asyncio.create_task(_battery_poll_loop()))
+        _background_tasks.append(asyncio.create_task(_idle_timeout_loop()))
         _thumb_cache_task = asyncio.create_task(_thumb_cache_loop())
         _background_tasks.append(_thumb_cache_task)
         async def _chain_analysis_resume():
@@ -1217,8 +1249,19 @@ async def api_connect():
     global _connect_task
     if _state["status"] not in ("disconnected",):
         raise HTTPException(409, detail=f"Status is '{_state['status']}' — cannot connect")
-    _connect_task = asyncio.create_task(_connect_with_retry("Connect"))
+    async def _manual_connect():
+        if await _connect_with_retry("Connect"):
+            _background_tasks.append(asyncio.create_task(_idle_timeout_loop()))
+    _connect_task = asyncio.create_task(_manual_connect())
     return {"status": "connecting"}
+
+
+@app.post("/api/idle/reset")
+async def api_idle_reset():
+    if _state["status"] != "connected":
+        raise HTTPException(409, detail=f"Status is '{_state['status']}' — not connected")
+    _idle_reset.set()
+    return {"status": "reset"}
 
 
 @app.post("/api/disconnect")
@@ -1290,6 +1333,7 @@ async def api_analysis_config_set(body: dict):
         "alert_cooldown_minutes": int,
         "battery_warning_threshold": int,
         "remove_person_only_images": bool,
+        "idle_timeout_minutes": int,
     }
     update = {}
     for key, typ in scalar_fields.items():
@@ -1300,6 +1344,10 @@ async def api_analysis_config_set(body: dict):
                 raise HTTPException(400, f"Invalid value for {key!r}")
     if "battery_warning_threshold" in update:
         update["battery_warning_threshold"] = max(1, min(100, update["battery_warning_threshold"]))
+    idle_changed = False
+    if "idle_timeout_minutes" in update:
+        update["idle_timeout_minutes"] = max(0, min(120, update["idle_timeout_minutes"]))
+        idle_changed = update["idle_timeout_minutes"] != _analysis_config.get("idle_timeout_minutes")
     if "alert_rules_enabled" in body:
         val = body["alert_rules_enabled"]
         if not isinstance(val, dict):
@@ -1307,6 +1355,8 @@ async def api_analysis_config_set(body: dict):
         update["alert_rules_enabled"] = {str(k): bool(v) for k, v in val.items()}
     saved = await asyncio.to_thread(analyzer.save_config, update)
     _analysis_config.update(saved)
+    if idle_changed and _state["status"] == "connected":
+        _idle_reset.set()  # restart the idle timer with the new duration
     alert_email = os.environ.get("GARDEPRO_ALERT_EMAIL", "").strip()
     return {
         **_analysis_config,

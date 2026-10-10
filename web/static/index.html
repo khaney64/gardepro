@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="theme-color" content="#1a1a2e">
   <title>GardePro</title>
-  <link rel="stylesheet" href="/static/style.css?v=13">
+  <link rel="stylesheet" href="/static/style.css?v=14">
 </head>
 <body>
 
@@ -225,6 +225,24 @@
           </div>
         </div>
 
+        <!-- Connection -->
+        <div class="settings-section">
+          <h3>Connection</h3>
+          <div class="settings-form">
+            <div class="form-row">
+              <label>Idle timeout</label>
+              <div style="display:flex;align-items:center;gap:6px">
+                <input id="idle-timeout-minutes" type="number" min="0" max="120" style="width:70px" value="5">
+                <span class="muted">min before auto-disconnect prompt (0 = off)</span>
+              </div>
+            </div>
+            <div class="form-row form-actions">
+              <span id="connection-save-status" class="muted"></span>
+              <button class="btn btn-primary btn-sm" onclick="saveAnalysisConfig()">Save</button>
+            </div>
+          </div>
+        </div>
+
       </div><!-- /.settings-panel (analysis + alerts) -->
 
       <!-- Camera settings — connection-gated -->
@@ -330,8 +348,24 @@
     </div>
   </div>
 
+  <!-- ── Idle auto-disconnect modal ── -->
+  <div id="idle-modal" class="connect-modal idle-modal hidden">
+    <div class="connect-modal-card">
+      <div class="connect-modal-header">
+        <h2>Still there?</h2>
+      </div>
+      <div class="idle-modal-body">
+        Disconnecting from camera in <strong id="idle-countdown">30</strong>s
+      </div>
+      <div class="connect-modal-footer">
+        <button class="btn btn-sm" onclick="cancelIdleDisconnect()">Cancel</button>
+        <button class="btn btn-sm btn-danger" onclick="idleDisconnectNow()">Disconnect</button>
+      </div>
+    </div>
+  </div>
+
   <!-- HLS.js from CDN (loaded only when needed) -->
   <script src="https://cdn.jsdelivr.net/npm/hls.js@latest/dist/hls.min.js"></script>
-  <script src="/static/app.js?v=21"></script>
+  <script src="/static/app.js?v=22"></script>
 </body>
 </html>
